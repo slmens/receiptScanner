@@ -1,0 +1,20 @@
+{
+  "name": "Receipt Vault",
+  "short_name": "Vault",
+  "description": "Receipt archival for small businesses — scan, extract, store.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0C0B09",
+  "theme_color": "#0C0B09",
+  "icons": [
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["finance", "productivity", "business"],
+  "screenshots": []
+}

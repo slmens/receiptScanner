@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Background -->
+  <rect width="512" height="512" rx="112" fill="#141210"/>
+  <!-- Subtle grid lines -->
+  <line x1="0" y1="170" x2="512" y2="170" stroke="#2C2822" stroke-width="1"/>
+  <line x1="0" y1="342" x2="512" y2="342" stroke="#2C2822" stroke-width="1"/>
+  <line x1="170" y1="0" x2="170" y2="512" stroke="#2C2822" stroke-width="1"/>
+  <line x1="342" y1="0" x2="342" y2="512" stroke="#2C2822" stroke-width="1"/>
+  <!-- Receipt shape -->
+  <rect x="148" y="96" width="216" height="290" rx="8" fill="#1C1A17" stroke="#3D382F" stroke-width="2"/>
+  <!-- Receipt serrated bottom edge -->
+  <path d="M148 358 L164 374 L180 358 L196 374 L212 358 L228 374 L244 358 L260 374 L276 358 L292 374 L308 358 L324 374 L340 358 L356 374 L364 358 L364 386 L148 386 Z" fill="#1C1A17"/>
+  <!-- Lines on receipt -->
+  <rect x="172" y="130" width="80" height="6" rx="3" fill="#C49A3C" opacity="0.9"/>
+  <rect x="172" y="154" width="168" height="3" rx="1.5" fill="#3D382F"/>
+  <rect x="172" y="174" width="140" height="3" rx="1.5" fill="#3D382F"/>
+  <rect x="172" y="194" width="155" height="3" rx="1.5" fill="#3D382F"/>
+  <rect x="172" y="214" width="168" height="3" rx="1.5" fill="#3D382F"/>
+  <!-- Divider -->
+  <rect x="172" y="234" width="168" height="1" rx="0.5" fill="#C49A3C" opacity="0.4"/>
+  <!-- Total amount line -->
+  <rect x="172" y="254" width="60" height="5" rx="2.5" fill="#5E5A52"/>
+  <rect x="268" y="251" width="72" height="10" rx="3" fill="#C49A3C" opacity="0.85"/>
+  <!-- Accent bar on left -->
+  <rect x="148" y="96" width="4" height="290" rx="2" fill="#C49A3C"/>
+</svg>
