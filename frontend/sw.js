@@ -4,7 +4,9 @@
  * API calls are network-first (never cached).
  */
 
-const CACHE_NAME = 'vault-shell-v1'
+// Bump this when we change frontend assets (e.g. Excel export logic).
+// This forces clients to re-cache the updated `/app.js`.
+const CACHE_NAME = 'vault-shell-v3'
 
 const SHELL_ASSETS = [
   '/',

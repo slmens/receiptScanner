@@ -143,7 +143,7 @@ export async function loginHandler(c: Context<{ Bindings: Env }>) {
     })
   }
 
-  let body: { passphrase?: string }
+  let body: { passphrase?: string; turnstileToken?: string }
   try {
     body = await c.req.json()
   } catch {
@@ -153,6 +153,20 @@ export async function loginHandler(c: Context<{ Bindings: Env }>) {
   if (!body.passphrase) {
     await recordFailedAttempt(c.env.RATE_LIMIT, ip)
     return c.json({ error: 'Passphrase is required' }, 400)
+  }
+
+  // Optional Turnstile bot protection (highly recommended if the app stays public)
+  if (c.env.TURNSTILE_SECRET?.trim()) {
+    if (!body.turnstileToken) {
+      await recordFailedAttempt(c.env.RATE_LIMIT, ip)
+      return c.json({ error: 'Turnstile token is required' }, 400)
+    }
+
+    const ok = await verifyTurnstile(body.turnstileToken, c.env.TURNSTILE_SECRET, ip)
+    if (!ok) {
+      await recordFailedAttempt(c.env.RATE_LIMIT, ip)
+      return c.json({ error: 'Turnstile verification failed' }, 401)
+    }
   }
 
   // Constant-time comparison to prevent timing attacks
@@ -184,6 +198,28 @@ export async function loginHandler(c: Context<{ Bindings: Env }>) {
     token,
     expiresAt: new Date((now + TOKEN_EXPIRY_SECONDS) * 1000).toISOString(),
   })
+}
+
+interface TurnstileVerifyResponse {
+  success: boolean
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  'error-codes'?: string[]
+}
+
+async function verifyTurnstile(token: string, secret: string, ip: string): Promise<boolean> {
+  const body = new URLSearchParams()
+  body.set('secret', secret)
+  body.set('response', token)
+  if (ip && ip !== 'unknown') body.set('remoteip', ip)
+
+  const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  })
+  if (!res.ok) return false
+  const data = (await res.json()) as TurnstileVerifyResponse
+  return data.success === true
 }
 
 export async function authMiddleware(

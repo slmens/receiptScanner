@@ -1,0 +1,41 @@
+name = "receipt-vault"
+account_id = "REPLACE_WITH_YOUR_ACCOUNT_ID"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Recommended for production once you add a custom domain route:
+# workers_dev = false
+workers_dev = true
+
+# ── D1 Database ────────────────────────────────────────────────────────────────
+# Create with: npx wrangler d1 create <db-name>
+[[d1_databases]]
+binding = "DB"
+database_name = "receipt-vault"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# ── R2 Bucket ──────────────────────────────────────────────────────────────────
+# Create with: npx wrangler r2 bucket create <bucket-name>
+[[r2_buckets]]
+binding = "RECEIPTS"
+bucket_name = "receipt-vault-images"
+
+# ── KV Namespace (login rate limiting) ─────────────────────────────────────────
+# Create with: npx wrangler kv namespace create RATE_LIMIT
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "REPLACE_WITH_RATE_LIMIT_KV_ID"
+
+# ── Secrets (set via CLI, never commit) ────────────────────────────────────────
+# npx wrangler secret put ANTHROPIC_API_KEY   (or OPENROUTER_API_KEY)
+# npx wrangler secret put AUTH_SECRET
+# npx wrangler secret put JWT_SECRET
+# npx wrangler secret put ENCRYPTION_KEY
+# npx wrangler secret put ALLOWED_ORIGIN
+# npx wrangler secret put TURNSTILE_SECRET   (optional)
+
+# ── Cron triggers ─────────────────────────────────────────────────────────────
+[triggers]
+crons = ["0 3 * * *"]
+

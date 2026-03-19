@@ -11,4 +11,7 @@
  */
 window.VAULT_CONFIG = {
   API_URL: 'https://YOUR_WORKER_NAME.YOUR_ACCOUNT.workers.dev',
+  // Optional: enable Cloudflare Turnstile on login to slow down brute force.
+  // Create a Turnstile widget in Cloudflare dashboard and set the site key here.
+  // TURNSTILE_SITE_KEY: '0x4AAAAAA....',
 }

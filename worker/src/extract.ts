@@ -31,7 +31,7 @@ Return a single JSON object with exactly these fields:
   "subtotal": 0.00,
   "hst": 0.00,
   "total": 0.00,
-  "payment_method": "cash|debit|credit|unknown",
+  "payment_method": "cash|debit|credit|e-transfer|unknown",
   "invoice_number": "INV-123 or null",
   "notes": "Any relevant notes or null"
 }
@@ -42,9 +42,13 @@ Packaging & Takeout, Utilities, Rent, Insurance, Marketing,
 Maintenance & Repair, Licensing & Permits, Delivery & Transport, Other
 
 Rules:
+- Read the document conservatively. Do not invent values that are not visible.
 - Ontario, Canada context: HST is 13%. If HST is not shown, calculate as subtotal * 0.13.
 - If the date is missing or illegible, use today's date.
 - If the vendor name is unclear, make your best guess from any visible text or logo.
+- Prefer the printed final total over any inferred arithmetic if they conflict.
+- If subtotal, HST, invoice number, or notes are not visible, return null for those nullable fields.
+- If payment method is not visible, return "unknown".
 - subtotal and hst may be null if only the final total is visible.
 - total must always be a number greater than 0.
 - Output ONLY the raw JSON object. No markdown, no code fences, no explanation.`
@@ -255,7 +259,12 @@ function validateCategory(raw?: string | null): string {
 }
 
 function validatePayment(raw?: string | null): string {
-  const v = raw?.toLowerCase().trim()
+  const v = (raw ?? '').toLowerCase().replace(/\s+/g, '-').trim()
   if (v === 'cash' || v === 'debit' || v === 'credit') return v
+  // Normalize common e-transfer/etransfer variants.
+  if (v === 'e-transfer' || v === 'etransfer' || v === 'interac-e-transfer') {
+    return 'e-transfer'
+  }
+  if (v.includes('etransfer') || v.includes('e-transfer')) return 'e-transfer'
   return 'unknown'
 }

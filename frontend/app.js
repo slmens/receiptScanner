@@ -25,7 +25,7 @@ const CATEGORIES = [
   'Other',
 ]
 
-const PAYMENT_METHODS = ['cash', 'debit', 'credit', 'unknown']
+const PAYMENT_METHODS = ['cash', 'debit', 'credit', 'e-transfer', 'unknown']
 
 const CATEGORY_BADGE = {
   'Food & Ingredients':   'amber',
@@ -92,20 +92,32 @@ const api = {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Request failed' }))
-      throw new Error(err.error ?? `Request failed (${res.status})`)
+      const error = new Error(err.error ?? `Request failed (${res.status})`)
+      error.status = res.status
+      error.data = err
+      throw error
     }
 
     return res.json()
   },
 
   login(passphrase) {
-    return this.request('POST', '/auth/login', { passphrase })
+    const payload = { passphrase }
+    const siteKey = window.VAULT_CONFIG?.TURNSTILE_SITE_KEY
+    if (siteKey && window.turnstile) {
+      payload.turnstileToken = window.turnstile.getResponse()
+    }
+    return this.request('POST', '/auth/login', payload)
   },
 
   extractReceipt(file) {
     const fd = new FormData()
     fd.append('file', file)
     return this.request('POST', '/api/receipts/extract', fd, true)
+  },
+
+  discardPending(imageKey) {
+    return this.request('POST', '/api/receipts/discard', { imageKey })
   },
 
   createReceipt(data) {
@@ -156,9 +168,11 @@ const api = {
 
 const auth = {
   TOKEN_KEY: 'vault:token',
+  REMEMBER_KEY: 'vault:remember',
 
   getToken() {
-    return localStorage.getItem(this.TOKEN_KEY)
+    // Prefer sessionStorage so tokens don't persist indefinitely on shared devices.
+    return sessionStorage.getItem(this.TOKEN_KEY) || localStorage.getItem(this.TOKEN_KEY)
   },
 
   isLoggedIn() {
@@ -167,10 +181,18 @@ const auth = {
 
   async login(passphrase) {
     const { token } = await api.login(passphrase)
-    localStorage.setItem(this.TOKEN_KEY, token)
+    const remember = localStorage.getItem(this.REMEMBER_KEY) === '1'
+    if (remember) {
+      localStorage.setItem(this.TOKEN_KEY, token)
+      sessionStorage.removeItem(this.TOKEN_KEY)
+    } else {
+      sessionStorage.setItem(this.TOKEN_KEY, token)
+      localStorage.removeItem(this.TOKEN_KEY)
+    }
   },
 
   clear() {
+    sessionStorage.removeItem(this.TOKEN_KEY)
     localStorage.removeItem(this.TOKEN_KEY)
   },
 
@@ -235,6 +257,179 @@ const router = {
 // ── Image optimizer (client-side) ──────────────────────────────────────────────
 
 const imgUtils = {
+  async getJpegOrientation(file) {
+    if (!file.type.includes('jpeg') && !file.type.includes('jpg')) return 1
+
+    const buf = await file.arrayBuffer()
+    const view = new DataView(buf)
+    if (view.getUint16(0, false) !== 0xFFD8) return 1
+
+    let offset = 2
+    while (offset < view.byteLength) {
+      const marker = view.getUint16(offset, false)
+      offset += 2
+      if (marker === 0xFFE1) {
+        const length = view.getUint16(offset, false)
+        offset += 2
+        if (view.getUint32(offset, false) !== 0x45786966) return 1 // "Exif"
+        offset += 6
+
+        const little = view.getUint16(offset, false) === 0x4949
+        const firstIfd = view.getUint32(offset + 4, little)
+        let dirOffset = offset + firstIfd
+        const entries = view.getUint16(dirOffset, little)
+        dirOffset += 2
+
+        for (let i = 0; i < entries; i++) {
+          const entryOffset = dirOffset + i * 12
+          if (view.getUint16(entryOffset, little) === 0x0112) {
+            return view.getUint16(entryOffset + 8, little)
+          }
+        }
+        return 1
+      }
+      if ((marker & 0xFF00) !== 0xFF00) break
+      offset += view.getUint16(offset, false)
+    }
+    return 1
+  },
+
+  async loadImage(file) {
+    return new Promise((resolve, reject) => {
+      const img = new Image()
+      const url = URL.createObjectURL(file)
+      img.onload = () => {
+        URL.revokeObjectURL(url)
+        resolve(img)
+      }
+      img.onerror = () => {
+        URL.revokeObjectURL(url)
+        reject(new Error('Failed to load image'))
+      }
+      img.src = url
+    })
+  },
+
+  drawWithOrientation(ctx, img, width, height, orientation) {
+    switch (orientation) {
+      case 2:
+        ctx.translate(width, 0)
+        ctx.scale(-1, 1)
+        break
+      case 3:
+        ctx.translate(width, height)
+        ctx.rotate(Math.PI)
+        break
+      case 4:
+        ctx.translate(0, height)
+        ctx.scale(1, -1)
+        break
+      case 5:
+        ctx.rotate(0.5 * Math.PI)
+        ctx.scale(1, -1)
+        break
+      case 6:
+        ctx.rotate(0.5 * Math.PI)
+        ctx.translate(0, -height)
+        break
+      case 7:
+        ctx.rotate(0.5 * Math.PI)
+        ctx.translate(width, -height)
+        ctx.scale(-1, 1)
+        break
+      case 8:
+        ctx.rotate(-0.5 * Math.PI)
+        ctx.translate(-width, 0)
+        break
+      default:
+        break
+    }
+    ctx.drawImage(img, 0, 0, width, height)
+  },
+
+  async transform(file, options = {}) {
+    if (file.type === 'application/pdf') return file
+
+    const {
+      rotation = 0,
+      crop = { top: 0, right: 0, bottom: 0, left: 0 },
+      maxPx = 1400,
+      quality = 0.82,
+      forceJpeg = true,
+    } = options
+
+    const img = await this.loadImage(file)
+    const orientation = await this.getJpegOrientation(file)
+    const rotatedByExif = orientation >= 5 && orientation <= 8
+    const orientedWidth = rotatedByExif ? img.naturalHeight : img.naturalWidth
+    const orientedHeight = rotatedByExif ? img.naturalWidth : img.naturalHeight
+
+    const baseCanvas = document.createElement('canvas')
+    baseCanvas.width = orientedWidth
+    baseCanvas.height = orientedHeight
+    const baseCtx = baseCanvas.getContext('2d')
+    baseCtx.save()
+    this.drawWithOrientation(baseCtx, img, img.naturalWidth, img.naturalHeight, orientation)
+    baseCtx.restore()
+
+    const cropLeft = Math.round(baseCanvas.width * (crop.left ?? 0))
+    const cropRight = Math.round(baseCanvas.width * (crop.right ?? 0))
+    const cropTop = Math.round(baseCanvas.height * (crop.top ?? 0))
+    const cropBottom = Math.round(baseCanvas.height * (crop.bottom ?? 0))
+    const sourceWidth = Math.max(32, baseCanvas.width - cropLeft - cropRight)
+    const sourceHeight = Math.max(32, baseCanvas.height - cropTop - cropBottom)
+    const quarterTurns = ((rotation % 360) + 360) % 360 / 90
+    const turns = [0, 1, 2, 3].includes(quarterTurns) ? quarterTurns : 0
+
+    const targetMax = Math.max(sourceWidth, sourceHeight) > maxPx
+      ? maxPx / Math.max(sourceWidth, sourceHeight)
+      : 1
+    const drawWidth = Math.max(1, Math.round(sourceWidth * targetMax))
+    const drawHeight = Math.max(1, Math.round(sourceHeight * targetMax))
+    const swapAxes = turns % 2 === 1
+
+    const finalCanvas = document.createElement('canvas')
+    finalCanvas.width = swapAxes ? drawHeight : drawWidth
+    finalCanvas.height = swapAxes ? drawWidth : drawHeight
+
+    const finalCtx = finalCanvas.getContext('2d')
+    finalCtx.fillStyle = '#f5f5f5'
+    finalCtx.fillRect(0, 0, finalCanvas.width, finalCanvas.height)
+    finalCtx.save()
+    if (turns === 1) {
+      finalCtx.translate(finalCanvas.width, 0)
+      finalCtx.rotate(Math.PI / 2)
+    } else if (turns === 2) {
+      finalCtx.translate(finalCanvas.width, finalCanvas.height)
+      finalCtx.rotate(Math.PI)
+    } else if (turns === 3) {
+      finalCtx.translate(0, finalCanvas.height)
+      finalCtx.rotate(-Math.PI / 2)
+    }
+    finalCtx.drawImage(
+      baseCanvas,
+      cropLeft,
+      cropTop,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      drawWidth,
+      drawHeight,
+    )
+    finalCtx.restore()
+
+    const mimeType = forceJpeg ? 'image/jpeg' : file.type
+    const ext = mimeType === 'image/png' ? 'png' : 'jpg'
+    const fileName = file.name.replace(/\.[^.]+$/, '') + `.${ext}`
+
+    return new Promise(resolve => {
+      finalCanvas.toBlob(blob => {
+        resolve(new File([blob], fileName, { type: mimeType }))
+      }, mimeType, quality)
+    })
+  },
+
   /**
    * Resize + JPEG compress an image file.
    * Uses progressive quality reduction to guarantee the result stays under
@@ -242,41 +437,30 @@ const imgUtils = {
    * enough for both OCR and on-screen reading while being ~4× smaller than
    * the previous 1600 px / 88 % default.
    */
-  optimize(file, maxPx = 1400, quality = 0.82) {
+  optimize(file, maxPx = 1400, quality = 0.82, edits = {}) {
     const TARGET_KB = 800
     return new Promise(resolve => {
       // PDFs pass through unchanged
       if (file.type === 'application/pdf') { resolve(file); return }
 
-      const img = new Image()
-      const url = URL.createObjectURL(file)
-      img.onload = () => {
-        URL.revokeObjectURL(url)
-        let { width, height } = img
-        if (Math.max(width, height) > maxPx) {
-          const r = maxPx / Math.max(width, height)
-          width = Math.round(width * r)
-          height = Math.round(height * r)
+      const tryEncode = async q => {
+        try {
+          const nextFile = await this.transform(file, {
+            rotation: edits.rotation ?? 0,
+            crop: edits.crop ?? { top: 0, right: 0, bottom: 0, left: 0 },
+            maxPx,
+            quality: q,
+          })
+          if (nextFile.size > TARGET_KB * 1024 && q > 0.62) {
+            tryEncode(Math.round((q - 0.06) * 100) / 100)
+          } else {
+            resolve(nextFile)
+          }
+        } catch {
+          resolve(file)
         }
-        const canvas = document.createElement('canvas')
-        canvas.width = width
-        canvas.height = height
-        canvas.getContext('2d').drawImage(img, 0, 0, width, height)
-
-        // Progressively reduce quality until under TARGET_KB
-        const tryEncode = q => {
-          canvas.toBlob(blob => {
-            if (blob.size > TARGET_KB * 1024 && q > 0.62) {
-              tryEncode(Math.round((q - 0.06) * 100) / 100)
-            } else {
-              resolve(new File([blob], file.name, { type: 'image/jpeg' }))
-            }
-          }, 'image/jpeg', q)
-        }
-        tryEncode(quality)
       }
-      img.onerror = () => resolve(file)
-      img.src = url
+      tryEncode(quality)
     })
   },
 
@@ -449,6 +633,15 @@ const views = {
                 required
               />
             </div>
+            ${window.VAULT_CONFIG?.TURNSTILE_SITE_KEY ? /* html */`
+              <div style="display:flex;justify-content:center;margin:0 0 14px">
+                <div class="cf-turnstile" data-sitekey="${window.VAULT_CONFIG.TURNSTILE_SITE_KEY}"></div>
+              </div>
+            ` : ''}
+            <label style="display:flex;align-items:center;gap:10px;margin:0 0 14px;font-size:13px;color:var(--clr-text-3)">
+              <input type="checkbox" id="remember-me" />
+              Remember this device
+            </label>
             <button class="btn btn--primary btn--full" type="submit" id="login-btn">
               Enter Vault
             </button>
@@ -461,6 +654,8 @@ const views = {
     document.getElementById('login-form').addEventListener('submit', async e => {
       e.preventDefault()
       const passphrase = document.getElementById('passphrase').value
+      const remember = document.getElementById('remember-me')?.checked === true
+      localStorage.setItem(auth.REMEMBER_KEY, remember ? '1' : '0')
       const btn = document.getElementById('login-btn')
       const errEl = document.getElementById('login-error')
 
@@ -469,6 +664,12 @@ const views = {
       errEl.style.display = 'none'
 
       try {
+        const siteKey = window.VAULT_CONFIG?.TURNSTILE_SITE_KEY
+        if (siteKey) {
+          if (!window.turnstile) throw new Error('Turnstile failed to load. Please refresh and try again.')
+          const t = window.turnstile.getResponse()
+          if (!t) throw new Error('Please complete the Turnstile check.')
+        }
         await auth.login(passphrase)
         const dest = router.intendedPath || '/'
         router.intendedPath = null
@@ -476,6 +677,7 @@ const views = {
       } catch (err) {
         errEl.textContent = err.message
         errEl.style.display = 'block'
+        if (window.turnstile) window.turnstile.reset()
         btn.disabled = false
         btn.textContent = 'Enter Vault'
       }
@@ -592,7 +794,20 @@ const views = {
   scan() {
     // files   : raw File objects (one per photo)
     // previews: data-URL strings for thumbnails
-    const scanState = { files: [], previews: [], imageKey: null, extracted: null, stitchedFile: null }
+    const defaultEdits = () => ({
+      rotation: 0,
+      crop: { top: 0, right: 0, bottom: 0, left: 0 },
+    })
+
+    const scanState = {
+      sourceFiles: [],
+      files: [],
+      previews: [],
+      edits: [],
+      imageKey: null,
+      extracted: null,
+      stitchedFile: null,
+    }
 
     this.main.innerHTML = /* html */`
       <div class="scan-view">
@@ -631,6 +846,9 @@ const views = {
                   ${url
                     ? `<img src="${url}" class="multi-thumb__img" alt="Part ${i + 1}" />`
                     : `<div class="multi-thumb__pdf">PDF</div>`}
+                  ${scanState.files[i]?.type !== 'application/pdf'
+                    ? `<button class="multi-thumb__edit" data-idx="${i}" title="Adjust image" type="button">Adjust</button>`
+                    : ''}
                   <button class="multi-thumb__remove" data-idx="${i}" title="Remove" type="button">✕</button>
                 </div>
               `).join('')}
@@ -681,9 +899,19 @@ const views = {
         btn.onclick = e => {
           e.stopPropagation()
           const idx = parseInt(btn.dataset.idx)
+          scanState.sourceFiles.splice(idx, 1)
           scanState.files.splice(idx, 1)
           scanState.previews.splice(idx, 1)
+          scanState.edits.splice(idx, 1)
           showUploadZone()
+        }
+      })
+
+      stage.querySelectorAll('.multi-thumb__edit').forEach(btn => {
+        btn.onclick = e => {
+          e.stopPropagation()
+          const idx = parseInt(btn.dataset.idx)
+          openEditor(idx)
         }
       })
 
@@ -698,9 +926,7 @@ const views = {
       }
       if (document.getElementById('btn-clear')) {
         document.getElementById('btn-clear').onclick = () => {
-          scanState.files = []
-          scanState.previews = []
-          showUploadZone()
+          resetScan()
         }
       }
       if (document.getElementById('btn-extract')) {
@@ -734,15 +960,149 @@ const views = {
           toast.info('Maximum 8 parts per receipt.')
           break
         }
-        const optimized = await imgUtils.optimize(raw)
+        const edits = defaultEdits()
+        const optimized = await imgUtils.optimize(raw, 1400, 0.82, edits)
         const preview = optimized.type !== 'application/pdf'
           ? await imgUtils.dataUrl(optimized)
           : null
+        scanState.sourceFiles.push(raw)
         scanState.files.push(optimized)
         scanState.previews.push(preview)
-
+        scanState.edits.push(edits)
       }
       showUploadZone()
+    }
+
+    const resetScan = async ({ discardRemote = false } = {}) => {
+      if (discardRemote && scanState.imageKey?.startsWith('pending/')) {
+        try {
+          await api.discardPending(scanState.imageKey)
+        } catch {
+          // Best-effort cleanup only. Cron cleanup still catches leftovers.
+        }
+      }
+      scanState.sourceFiles = []
+      scanState.files = []
+      scanState.previews = []
+      scanState.edits = []
+      scanState.imageKey = null
+      scanState.extracted = null
+      scanState.stitchedFile = null
+      showUploadZone()
+    }
+
+    const openEditor = async idx => {
+      const sourceFile = scanState.sourceFiles[idx]
+      if (!sourceFile || sourceFile.type === 'application/pdf') {
+        toast.info('PDFs do not need image adjustments.')
+        return
+      }
+
+      const draft = JSON.parse(JSON.stringify(scanState.edits[idx] ?? defaultEdits()))
+      const overlay = document.createElement('div')
+      overlay.className = 'modal-overlay modal-overlay--editor'
+      overlay.innerHTML = /* html */`
+        <div class="modal editor-modal">
+          <div class="editor-modal__header">
+            <div>
+              <div class="modal__title" style="margin-bottom:4px">Adjust Receipt</div>
+              <div class="editor-modal__sub">Rotate and trim edges before analysis.</div>
+            </div>
+            <button class="btn btn--ghost btn--sm" id="editor-close" type="button">Close</button>
+          </div>
+          <div class="editor-modal__preview">
+            <img id="editor-preview" alt="Receipt adjustment preview" />
+          </div>
+          <div class="editor-modal__toolbar">
+            <button class="btn btn--secondary btn--sm" id="rotate-left" type="button">Rotate Left</button>
+            <button class="btn btn--secondary btn--sm" id="rotate-right" type="button">Rotate Right</button>
+            <button class="btn btn--ghost btn--sm" id="editor-reset" type="button">Reset</button>
+          </div>
+          <div class="editor-sliders">
+            ${[
+              ['top', 'Trim Top'],
+              ['right', 'Trim Right'],
+              ['bottom', 'Trim Bottom'],
+              ['left', 'Trim Left'],
+            ].map(([key, label]) => /* html */`
+              <label class="editor-slider">
+                <span>${label}</span>
+                <input type="range" id="crop-${key}" min="0" max="25" step="1" value="${Math.round((draft.crop[key] ?? 0) * 100)}" />
+                <span id="crop-${key}-value">${Math.round((draft.crop[key] ?? 0) * 100)}%</span>
+              </label>
+            `).join('')}
+          </div>
+          <div class="editor-modal__actions">
+            <button class="btn btn--ghost" id="editor-cancel" type="button">Cancel</button>
+            <button class="btn btn--primary" id="editor-apply" type="button">Apply Changes</button>
+          </div>
+        </div>
+      `
+      document.body.appendChild(overlay)
+
+      const closeEditor = () => overlay.remove()
+
+      const renderPreview = async () => {
+        const previewFile = await imgUtils.transform(sourceFile, {
+          rotation: draft.rotation,
+          crop: draft.crop,
+          maxPx: 1200,
+          quality: 0.9,
+        })
+        document.getElementById('editor-preview').src = await imgUtils.dataUrl(previewFile)
+        ;['top', 'right', 'bottom', 'left'].forEach(key => {
+          document.getElementById(`crop-${key}-value`).textContent = `${Math.round((draft.crop[key] ?? 0) * 100)}%`
+        })
+      }
+
+      overlay.addEventListener('click', e => {
+        if (e.target === overlay) closeEditor()
+      })
+      document.getElementById('editor-close').onclick = closeEditor
+      document.getElementById('editor-cancel').onclick = closeEditor
+      document.getElementById('rotate-left').onclick = async () => {
+        draft.rotation = (draft.rotation + 270) % 360
+        await renderPreview()
+      }
+      document.getElementById('rotate-right').onclick = async () => {
+        draft.rotation = (draft.rotation + 90) % 360
+        await renderPreview()
+      }
+      document.getElementById('editor-reset').onclick = async () => {
+        draft.rotation = 0
+        draft.crop = defaultEdits().crop
+        ;['top', 'right', 'bottom', 'left'].forEach(key => {
+          document.getElementById(`crop-${key}`).value = '0'
+        })
+        await renderPreview()
+      }
+
+      ;['top', 'right', 'bottom', 'left'].forEach(key => {
+        document.getElementById(`crop-${key}`).addEventListener('input', async e => {
+          draft.crop[key] = parseInt(e.target.value, 10) / 100
+          await renderPreview()
+        })
+      })
+
+      document.getElementById('editor-apply').onclick = async () => {
+        const btn = document.getElementById('editor-apply')
+        btn.disabled = true
+        btn.innerHTML = '<span class="spinner"></span> Applying…'
+        try {
+          const optimized = await imgUtils.optimize(sourceFile, 1400, 0.82, draft)
+          scanState.files[idx] = optimized
+          scanState.previews[idx] = await imgUtils.dataUrl(optimized)
+          scanState.edits[idx] = JSON.parse(JSON.stringify(draft))
+          closeEditor()
+          showUploadZone()
+        } catch (err) {
+          toast.error('Failed to adjust image: ' + err.message)
+          btn.disabled = false
+          btn.textContent = 'Apply Changes'
+        }
+      }
+
+      await renderPreview()
     }
 
     // ── Extraction ────────────────────────────────────────────────────────────
@@ -888,10 +1248,7 @@ const views = {
       `
 
       document.getElementById('btn-discard').onclick = () => {
-        scanState.files = []
-        scanState.previews = []
-        scanState.stitchedFile = null
-        showUploadZone()
+        resetScan({ discardRemote: true })
       }
 
       document.getElementById('btn-save').onclick = async () => {
@@ -905,7 +1262,7 @@ const views = {
         const uploadedFile = scanState.stitchedFile ?? scanState.files[0]
 
         try {
-          await api.createReceipt({
+          const payload = {
             imageKey:         scanState.imageKey,
             originalFilename: uploadedFile.name,
             mimeType:         uploadedFile.type,
@@ -918,14 +1275,46 @@ const views = {
             paymentMethod:    document.getElementById('f-payment').value,
             invoiceNumber:    document.getElementById('f-invoice').value || null,
             notes:            document.getElementById('f-notes').value || null,
-          })
+          }
+
+          await api.createReceipt(payload)
           toast.success('Receipt saved!')
-          scanState.files = []
-          scanState.previews = []
-          scanState.stitchedFile = null
-          showUploadZone()
+          resetScan()
         } catch (err) {
-          toast.error(err.message)
+          if (err.status === 409 && err.data?.duplicates?.length) {
+            const preview = err.data.duplicates
+              .map(d => `${d.vendor} · ${fmt.date(d.date)} · ${fmt.currency(d.total)}`)
+              .join('\n')
+            const proceed = confirm(
+              `Possible duplicate receipt detected:\n\n${preview}\n\nSave anyway?`,
+            )
+            if (proceed) {
+              try {
+                await api.createReceipt({
+                  imageKey:         scanState.imageKey,
+                  originalFilename: uploadedFile.name,
+                  mimeType:         uploadedFile.type,
+                  date:             document.getElementById('f-date').value,
+                  vendor:           document.getElementById('f-vendor').value,
+                  category:         document.getElementById('f-category').value,
+                  subtotal:         parseFloatOrNull(document.getElementById('f-subtotal').value),
+                  hst:              parseFloatOrNull(document.getElementById('f-hst').value),
+                  total:            parseFloat(document.getElementById('f-total').value),
+                  paymentMethod:    document.getElementById('f-payment').value,
+                  invoiceNumber:    document.getElementById('f-invoice').value || null,
+                  notes:            document.getElementById('f-notes').value || null,
+                  confirmDuplicate: true,
+                })
+                toast.success('Receipt saved!')
+                resetScan()
+                return
+              } catch (retryErr) {
+                toast.error(retryErr.message)
+              }
+            }
+          } else {
+            toast.error(err.message)
+          }
           btn.disabled = false
           btn.textContent = 'Save Receipt'
         }
@@ -1529,39 +1918,42 @@ async function downloadExcel(receipts) {
 
   const headers = [
     'Date', 'Vendor', 'Category', 'Subtotal', 'HST', 'Total',
-    'Payment', 'Invoice #', 'Notes', 'Image Name', 'View Receipt',
+    'Payment', 'Invoice #', 'Notes', 'Image Name',
   ]
 
-  const rows = receipts.map(r => [
-    r.date,
-    r.vendor,
-    r.category,
-    r.subtotal ?? '',
-    r.hst ?? '',
-    r.total,
-    r.payment_method,
-    r.invoice_number ?? '',
-    r.notes ?? '',
-    r.original_filename ?? '',
-    'Open in App',
-  ])
+  const rows = receipts.map((r, index) => {
+    const fileType = r.file_type || ''
+    const ext =
+      fileType.includes('pdf') ? 'pdf' :
+      fileType.includes('png') ? 'png' :
+      fileType.includes('webp') ? 'webp' :
+      fileType.includes('gif') ? 'gif' :
+      'jpg'
+
+    // Stable, easy-to-reference image name starting from 0.
+    const imageName = `${String(index).padStart(4, '0')}.${ext}`
+
+    return [
+      r.date,
+      r.vendor,
+      r.category,
+      r.subtotal ?? '',
+      r.hst ?? '',
+      r.total,
+      r.payment_method,
+      r.invoice_number ?? '',
+      r.notes ?? '',
+      imageName,
+    ]
+  })
 
   const ws = window.XLSX.utils.aoa_to_sheet([headers, ...rows])
 
-  // Add hyperlinks to the "View Receipt" column (index 10)
-  const appOrigin = window.location.origin
-  receipts.forEach((r, i) => {
-    const cellRef = window.XLSX.utils.encode_cell({ r: i + 1, c: 10 })
-    if (ws[cellRef]) {
-      ws[cellRef].l = { Target: `${appOrigin}/#/receipt/${r.id}`, Tooltip: `Receipt: ${r.vendor} — ${r.date}` }
-    }
-  })
-
-  // Column widths
+  // Column widths (no "View Receipt" column anymore)
   ws['!cols'] = [
     { wch: 12 }, { wch: 28 }, { wch: 24 }, { wch: 10 },
     { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 14 },
-    { wch: 32 }, { wch: 28 }, { wch: 14 },
+    { wch: 32 }, { wch: 24 },
   ]
 
   const wb = window.XLSX.utils.book_new()

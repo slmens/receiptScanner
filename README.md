@@ -27,6 +27,33 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
+### Customizing resource names (optional)
+
+By default, `setup.sh` creates Cloudflare resources with generalized names based on the Worker name in `worker/wrangler.toml`.
+You can override names via environment variables:
+
+```bash
+cd scanner
+PROJECT_NAME=my-vault D1_NAME=my-vault R2_BUCKET=my-vault-images KV_TITLE=RATE_LIMIT ./setup.sh
+```
+
+### Reset / start from scratch (destroys all data)
+
+This project includes a destructive cleanup script:
+
+```bash
+cd scanner
+chmod +x destroy.sh
+./destroy.sh
+```
+
+It deletes the Pages project, Worker, D1 database, R2 bucket, and KV namespace created by `setup.sh`.
+You can also override names the same way:
+
+```bash
+PROJECT_NAME=my-vault D1_NAME=my-vault R2_BUCKET=my-vault-images KV_TITLE=RATE_LIMIT ./destroy.sh
+```
+
 The script will ask for:
 1. Your AI provider choice (Anthropic or OpenRouter) + API key
 2. A passphrase you'll use to log in to the app
@@ -80,6 +107,9 @@ database_id = "PASTE_YOUR_D1_ID_HERE"
 [[kv_namespaces]]
 id = "PASTE_YOUR_KV_ID_HERE"
 ```
+
+> Tip: this repo includes `worker/wrangler.example.toml` as a safe template for GitHub.
+> Copy it to `worker/wrangler.toml` and fill in your IDs.
 
 ### Step 4 — Run database migration
 
@@ -209,12 +239,82 @@ scanner/
 |---|---|
 | **Authentication** | Single passphrase → JWT (HS256, 7-day expiry). Constant-time comparison prevents timing attacks. |
 | **Rate limiting** | 10 failed login attempts per IP per 15 min → 429. Tracked in Cloudflare KV. |
-| **CORS** | Locked to your Pages domain via `ALLOWED_ORIGIN` secret. No other origin can call the API. |
+| **CORS** | Locked to an explicit allowlist via `ALLOWED_ORIGIN` secret (no reflect fallback). |
 | **Data encryption** | Sensitive D1 columns (`vendor`, `notes`, `invoice_number`, `original_filename`) encrypted at rest with AES-256-GCM. Key derived from `ENCRYPTION_KEY` secret via HKDF-SHA-256. |
 | **Image privacy** | R2 bucket is private. Images are streamed through the authenticated Worker — no public R2 URLs. |
 | **Security headers** | `Strict-Transport-Security`, `X-Frame-Options: DENY`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` on every response. |
 | **CSP** | Content Security Policy on Pages responses restricts script/style/font/connect sources. |
 | **Secrets** | All credentials stored as Cloudflare Worker secrets — never in code or config files. |
+
+### Important notes (read this)
+
+- **CORS is not access control.** Setting `ALLOWED_ORIGIN` stops *other websites* from calling your API from a browser. It does **not** make the site private and it does **not** stop someone from visiting your Pages URL.
+- **Use the stable Pages production URL**, not a per-deployment preview URL.
+  - Stable: `https://<your-project>.pages.dev`
+  - Preview (changes every deploy): `https://<hash>.<your-project>.pages.dev`
+- **If the app is public, brute force is still possible** (rate limiting helps, but a distributed attacker can try from many IPs). Use a strong passphrase and strongly consider Cloudflare Access + Turnstile.
+
+### Lock CORS to the stable Pages origin
+
+Set `ALLOWED_ORIGIN` to your **production** Pages origin (stable):
+
+```bash
+cd worker
+npx wrangler secret put ALLOWED_ORIGIN
+```
+
+Example value:
+
+```text
+https://receipt-vault.pages.dev
+```
+
+You can provide a comma-separated list for local dev:
+
+```text
+https://receipt-vault.pages.dev,http://localhost:3000
+```
+
+### Add bot protection on login (Turnstile)
+
+This project supports optional Turnstile verification on `/auth/login`.
+
+1. Create a Turnstile widget in Cloudflare (Zero Trust / Turnstile).
+2. Set the secrets/config:
+   - Worker secret: `TURNSTILE_SECRET` (required to enforce Turnstile server-side)
+   - Frontend config: `TURNSTILE_SITE_KEY` (shows the widget on the login page)
+
+```bash
+cd worker
+npx wrangler secret put TURNSTILE_SECRET
+```
+
+In `frontend/config.js` (generated, gitignored), add:
+
+```js
+window.VAULT_CONFIG = {
+  API_URL: 'https://...workers.dev',
+  TURNSTILE_SITE_KEY: '0x4AAAAAA....',
+}
+```
+
+### Make it “private like Tailscale” (Cloudflare Access)
+
+If you want the app to be **unreachable** to the public internet (recommended), put the Pages site behind **Cloudflare Access**:
+
+- Create an Access application for your Pages domain (e.g. `https://receipt-vault.pages.dev`)
+- Add a policy that allows only your identity (email / Google / GitHub)
+
+This blocks anonymous visitors before they ever see the login page.
+
+### About `workers.dev` exposure
+
+Without a custom domain/route, your Worker API is typically reachable on `*.workers.dev`.
+To reduce the exposed surface:
+
+- Keep auth strong (passphrase, rate limiting, Turnstile)
+- Consider protecting the Worker hostname with Access as well (if your plan supports it)
+- If you later add a custom domain, you can disable `workers_dev` and route traffic only through that domain
 
 ---
 

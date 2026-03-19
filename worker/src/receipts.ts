@@ -38,6 +38,19 @@ async function decryptRows(rows: ReceiptRow[], encKey: CryptoKey): Promise<Recei
   return Promise.all(rows.map(r => decryptRow(r, encKey)))
 }
 
+function normalizeText(value: string | null | undefined): string {
+  return (value ?? '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[^a-z0-9 ]/g, '')
+    .trim()
+}
+
+function canonicalMime(mimeType: string): string {
+  if (mimeType === 'image/jpg') return 'image/jpeg'
+  return mimeType
+}
+
 // ── Extract (step 1 of 2-step scan flow) ──────────────────────────────────────
 
 /**
@@ -52,27 +65,83 @@ export async function extractReceiptHandler(c: AppContext) {
   const file = formData.get('file') as File | null
   if (!file) return c.json({ error: 'Field "file" is required' }, 400)
 
-  const mimeType = file.type || 'image/jpeg'
+  const mimeType = canonicalMime(file.type || 'image/jpeg')
   const bytes = new Uint8Array(await file.arrayBuffer())
 
   if (bytes.length === 0) return c.json({ error: 'File is empty' }, 400)
   if (bytes.length > 20 * 1024 * 1024) return c.json({ error: 'File exceeds 20 MB limit' }, 413)
 
+  // Basic content sniffing (magic bytes) to prevent obvious type spoofing.
+  // This is not an antivirus. It just ensures the upload is plausibly the declared format.
+  const sniffed = sniffMime(bytes)
+  if (!sniffed) {
+    return c.json({ error: 'Unsupported or unrecognized file format' }, 415)
+  }
+  if (canonicalMime(sniffed) !== mimeType) {
+    return c.json({ error: `File type mismatch. Detected ${sniffed}, got ${mimeType}` }, 415)
+  }
+
   const tempId = crypto.randomUUID()
   const imageKey = buildTempKey(tempId, mimeType)
 
-  // Upload to R2 and extract in parallel
-  const [, extracted] = await Promise.all([
-    uploadToR2(c.env.RECEIPTS, imageKey, bytes.buffer, mimeType),
-    extractReceipt(bytes, mimeType, c.env),
-  ])
+  try {
+    // Upload to R2 and extract in parallel
+    const [, extracted] = await Promise.all([
+      uploadToR2(c.env.RECEIPTS, imageKey, bytes.buffer, mimeType),
+      extractReceipt(bytes, mimeType, c.env),
+    ])
 
-  return c.json({
-    imageKey,
-    originalFilename: file.name,
-    mimeType,
-    extracted,
-  })
+    return c.json({
+      imageKey,
+      originalFilename: file.name,
+      mimeType,
+      extracted,
+    })
+  } catch (err) {
+    await c.env.RECEIPTS.delete(imageKey).catch(() => null)
+    const message =
+      err instanceof Error ? err.message : 'Unknown error'
+    console.error('extractReceiptHandler failed', err)
+    // Most failures here are upstream AI/provider problems; return a clear error
+    // instead of an opaque 500 so the client can show a useful message.
+    return c.json(
+      { error: 'Receipt analysis failed', detail: message },
+      502,
+    )
+  }
+}
+
+function sniffMime(bytes: Uint8Array): string | null {
+  if (bytes.length < 12) return null
+
+  // PDF: %PDF-
+  if (
+    bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 &&
+    bytes[3] === 0x46 && bytes[4] === 0x2d
+  ) return 'application/pdf'
+
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
+
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+    bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
+  ) return 'image/png'
+
+  // GIF: GIF87a / GIF89a
+  if (
+    bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 &&
+    bytes[3] === 0x38 && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61
+  ) return 'image/gif'
+
+  // WebP: RIFF....WEBP
+  if (
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) return 'image/webp'
+
+  return null
 }
 
 // ── Create (step 2 of 2-step scan flow) ───────────────────────────────────────
@@ -96,6 +165,7 @@ export async function createReceiptHandler(c: AppContext) {
     paymentMethod: string
     invoiceNumber: string | null
     notes: string | null
+    confirmDuplicate?: boolean
   }
 
   try {
@@ -108,9 +178,59 @@ export async function createReceiptHandler(c: AppContext) {
   if (!body.date) return c.json({ error: 'date is required' }, 400)
   if (!body.vendor) return c.json({ error: 'vendor is required' }, 400)
   if (typeof body.total !== 'number') return c.json({ error: 'total must be a number' }, 400)
+  if (body.total <= 0) return c.json({ error: 'total must be greater than 0' }, 400)
+
+  const encKey = await deriveEncryptionKey(c.env.ENCRYPTION_KEY)
+
+  // Warn before likely duplicates are created.
+  if (!body.confirmDuplicate) {
+    const candidateRows = await c.env.DB.prepare(`
+      SELECT id, date, vendor, category, subtotal, hst, total, payment_method,
+             invoice_number, notes, image_key, original_filename, file_type,
+             is_edited, created_at, updated_at, deleted_at
+      FROM receipts
+      WHERE deleted_at IS NULL
+        AND date = ?
+        AND ABS(total - ?) < 0.009
+      ORDER BY created_at DESC
+      LIMIT 12
+    `)
+      .bind(body.date, body.total)
+      .all<ReceiptRow>()
+
+    const decryptedCandidates = await decryptRows(candidateRows.results, encKey)
+    const vendorNorm = normalizeText(body.vendor)
+    const invoiceNorm = normalizeText(body.invoiceNumber)
+    const filenameNorm = normalizeText(body.originalFilename)
+
+    const duplicates = decryptedCandidates.filter(row => {
+      const sameVendor = normalizeText(row.vendor) === vendorNorm
+      const sameInvoice =
+        invoiceNorm &&
+        normalizeText(row.invoice_number) === invoiceNorm
+      const sameFilename =
+        filenameNorm &&
+        normalizeText(row.original_filename) === filenameNorm
+
+      return sameVendor || sameInvoice || sameFilename
+    })
+
+    if (duplicates.length > 0) {
+      return c.json({
+        error: 'Possible duplicate receipt detected',
+        duplicates: duplicates.slice(0, 3).map(row => ({
+          id: row.id,
+          date: row.date,
+          vendor: row.vendor,
+          total: row.total,
+          created_at: row.created_at,
+        })),
+      }, 409)
+    }
+  }
 
   const id = crypto.randomUUID()
-  const mimeType = body.mimeType || 'image/jpeg'
+  const mimeType = canonicalMime(body.mimeType || 'image/jpeg')
 
   // Move from pending/ to receipts/
   let finalKey = body.imageKey
@@ -126,8 +246,6 @@ export async function createReceiptHandler(c: AppContext) {
     }
   }
 
-  // Encrypt sensitive text fields before storing
-  const encKey = await deriveEncryptionKey(c.env.ENCRYPTION_KEY)
   const [encVendor, encNotes, encInvoiceNumber, encOriginalFilename] = await Promise.all([
     encryptField(body.vendor.trim(), encKey),
     maybeEncrypt(body.notes?.trim() ?? null, encKey),
@@ -165,6 +283,24 @@ export async function createReceiptHandler(c: AppContext) {
   if (!row) return c.json({ error: 'Failed to retrieve saved receipt' }, 500)
 
   return c.json({ receipt: await decryptRow(row, encKey) }, 201)
+}
+
+export async function discardPendingHandler(c: AppContext) {
+  let body: { imageKey?: string }
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400)
+  }
+
+  const imageKey = body.imageKey?.trim()
+  if (!imageKey) return c.json({ error: 'imageKey is required' }, 400)
+  if (!imageKey.startsWith('pending/')) {
+    return c.json({ error: 'Only pending uploads can be discarded' }, 400)
+  }
+
+  await c.env.RECEIPTS.delete(imageKey)
+  return c.json({ ok: true })
 }
 
 // ── List ───────────────────────────────────────────────────────────────────────
@@ -352,7 +488,8 @@ export async function serveImageHandler(c: AppContext) {
   return new Response(file.body, {
     headers: {
       'Content-Type': file.contentType,
-      'Cache-Control': 'private, max-age=3600',
+      // Receipts are sensitive; don't allow caching.
+      'Cache-Control': 'no-store',
     },
   })
 }
@@ -364,11 +501,10 @@ export async function getStatsHandler(c: AppContext) {
   const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
 
   const [monthStats, allTimeStats, topCategories, recentReceipts] = await Promise.all([
-    // Count by created_at (scan date) so receipts scanned this month always appear,
-    // regardless of what date is printed on the receipt itself.
+    // Count by the receipt's actual `date` (printed date), not when it was scanned/imported.
     c.env.DB.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(total), 0) as total
-      FROM receipts WHERE created_at LIKE ? AND deleted_at IS NULL
+      FROM receipts WHERE date LIKE ? AND deleted_at IS NULL
     `)
       .bind(`${thisMonth}%`)
       .first<{ count: number; total: number }>(),

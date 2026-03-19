@@ -10,6 +10,8 @@ export interface Env {
   ENCRYPTION_KEY: string
   // CORS allowed origin — set to your Pages URL (e.g. https://receipt-vault.pages.dev)
   ALLOWED_ORIGIN: string
+  // Optional: Cloudflare Turnstile secret for login bot protection
+  TURNSTILE_SECRET?: string
   // KV namespace for login rate limiting
   RATE_LIMIT: KVNamespace
 }

@@ -1,11 +1,11 @@
 import { Hono } from 'hono'
-import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 
 import type { Env, Variables } from './types'
 import { authMiddleware, loginHandler } from './auth'
 import {
   createReceiptHandler,
+  discardPendingHandler,
   deleteReceiptHandler,
   extractReceiptHandler,
   getReceiptHandler,
@@ -22,17 +22,55 @@ const app = new Hono<{ Bindings: Env; Variables: Variables }>()
 
 app.use('*', logger())
 
-// Dynamic CORS: locked to the configured Pages origin.
-// Falls back to the request origin only if ALLOWED_ORIGIN is not set (dev mode).
+// CORS: explicit allowlist only (no reflect fallback).
+// Set ALLOWED_ORIGIN to your stable Pages production origin, e.g.:
+//   https://receipt-vault.pages.dev
+// You may also provide a comma-separated list for dev, e.g.:
+//   https://receipt-vault.pages.dev,http://localhost:3000
 app.use('*', async (c, next) => {
-  const allowedOrigin = c.env.ALLOWED_ORIGIN?.trim()
-  return cors({
-    origin: allowedOrigin || (origin => origin), // dev fallback — lock down in production
-    allowHeaders: ['Authorization', 'Content-Type'],
-    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    maxAge: 86400,
-    credentials: false,
-  })(c, next)
+  const origin = c.req.header('Origin')
+  const raw = (c.env.ALLOWED_ORIGIN ?? '').trim()
+  const allowed = new Set(
+    raw
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean),
+  )
+
+  // Always pass through non-browser requests (no Origin header), e.g. curl.
+  if (!origin) {
+    await next()
+    return
+  }
+
+  // Reject cross-origin requests when allowlist isn't configured.
+  if (allowed.size === 0) {
+    return c.json({ error: 'CORS is not configured' }, 403)
+  }
+
+  if (!allowed.has(origin)) {
+    // Do not reflect untrusted origins. Browsers will block without CORS headers.
+    return c.json({ error: 'Origin not allowed' }, 403)
+  }
+
+  // Handle preflight
+  if (c.req.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Access-Control-Allow-Origin': origin,
+        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+        'Access-Control-Allow-Headers': 'Authorization,Content-Type',
+        'Access-Control-Max-Age': '86400',
+        'Vary': 'Origin',
+      },
+    })
+  }
+
+  await next()
+  c.res.headers.set('Access-Control-Allow-Origin', origin)
+  c.res.headers.set('Vary', 'Origin')
+  return c.res
 })
 
 // Security headers on every response
@@ -62,6 +100,7 @@ app.use('/api/*', authMiddleware)
 
 // Receipts — note: /extract must come before /:id to avoid param collision
 app.post('/api/receipts/extract', extractReceiptHandler)
+app.post('/api/receipts/discard', discardPendingHandler)
 app.get('/api/receipts', listReceiptsHandler)
 app.post('/api/receipts', createReceiptHandler)
 app.get('/api/receipts/:id', getReceiptHandler)
