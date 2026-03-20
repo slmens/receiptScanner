@@ -194,8 +194,9 @@ echo -e "  ${BOLD}1. AI Provider${RESET}"
 echo -e "  Which API do you want to use for receipt extraction?\n"
 echo -e "    ${BOLD}1)${RESET} Anthropic direct  ${DIM}(https://console.anthropic.com)${RESET}"
 echo -e "    ${BOLD}2)${RESET} OpenRouter        ${DIM}(https://openrouter.ai/keys — supports many models)${RESET}"
+echo -e "    ${BOLD}3)${RESET} Mistral OCR       ${DIM}(https://console.mistral.ai — mistral-ocr-latest)${RESET}"
 echo ""
-read -r -p "  Choice [1/2]: " PROVIDER_CHOICE
+read -r -p "  Choice [1/2/3]: " PROVIDER_CHOICE
 
 if [[ "$PROVIDER_CHOICE" == "2" ]]; then
   echo ""
@@ -206,8 +207,21 @@ if [[ "$PROVIDER_CHOICE" == "2" ]]; then
   echo ""
   echo "$OR_KEY" | $WRANGLER secret put OPENROUTER_API_KEY
   ok "OPENROUTER_API_KEY set"
-  # Set Anthropic key to empty so it doesn't accidentally take precedence
+  # Disable unused providers
   echo "unused" | $WRANGLER secret put ANTHROPIC_API_KEY 2>/dev/null || true
+  echo "unused" | $WRANGLER secret put MISTRAL_API_KEY 2>/dev/null || true
+elif [[ "$PROVIDER_CHOICE" == "3" ]]; then
+  echo ""
+  echo -e "  ${BOLD}Mistral API Key${RESET}"
+  echo -e "  ${DIM}Get yours at https://console.mistral.ai/api-keys${RESET}"
+  echo -e "  ${DIM}Uses mistral-ocr-latest for text extraction + mistral-small-latest for parsing${RESET}"
+  read -r -s -p "  MISTRAL_API_KEY: " MISTRAL_KEY
+  echo ""
+  echo "$MISTRAL_KEY" | $WRANGLER secret put MISTRAL_API_KEY
+  ok "MISTRAL_API_KEY set"
+  # Disable unused providers
+  echo "unused" | $WRANGLER secret put ANTHROPIC_API_KEY 2>/dev/null || true
+  echo "unused" | $WRANGLER secret put OPENROUTER_API_KEY 2>/dev/null || true
 else
   echo ""
   echo -e "  ${BOLD}Anthropic API Key${RESET}"
@@ -216,6 +230,9 @@ else
   echo ""
   echo "$ANTHROPIC_KEY" | $WRANGLER secret put ANTHROPIC_API_KEY
   ok "ANTHROPIC_API_KEY set"
+  # Disable unused providers
+  echo "unused" | $WRANGLER secret put OPENROUTER_API_KEY 2>/dev/null || true
+  echo "unused" | $WRANGLER secret put MISTRAL_API_KEY 2>/dev/null || true
 fi
 
 echo ""

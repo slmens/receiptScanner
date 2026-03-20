@@ -59,12 +59,12 @@ const ANTHROPIC_MODEL  = 'claude-sonnet-4-6'
 
 /**
  * Extract receipt data from an image or PDF.
- * Uses OpenRouter if OPENROUTER_API_KEY is set, otherwise falls back to Anthropic direct.
+ * Provider priority: MISTRAL_API_KEY → OPENROUTER_API_KEY → ANTHROPIC_API_KEY
  */
 export async function extractReceipt(
   imageData: Uint8Array,
   mimeType: string,
-  env: Pick<Env, 'ANTHROPIC_API_KEY' | 'OPENROUTER_API_KEY'>,
+  env: Pick<Env, 'ANTHROPIC_API_KEY' | 'OPENROUTER_API_KEY' | 'MISTRAL_API_KEY'>,
 ): Promise<ExtractedData> {
   // HEIC/HEIF are not supported by the Claude vision API.
   // The PWA converts them automatically when using the camera button,
@@ -83,13 +83,16 @@ export async function extractReceipt(
     )
   }
 
-  if (env.OPENROUTER_API_KEY) {
+  if (env.MISTRAL_API_KEY && env.MISTRAL_API_KEY !== 'unused') {
+    return extractViaMistral(imageData, mimeType, env.MISTRAL_API_KEY)
+  }
+  if (env.OPENROUTER_API_KEY && env.OPENROUTER_API_KEY !== 'unused') {
     return extractViaOpenRouter(imageData, mimeType, env.OPENROUTER_API_KEY)
   }
-  if (env.ANTHROPIC_API_KEY) {
+  if (env.ANTHROPIC_API_KEY && env.ANTHROPIC_API_KEY !== 'unused') {
     return extractViaAnthropic(imageData, mimeType, env.ANTHROPIC_API_KEY)
   }
-  throw new Error('No API key configured. Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY.')
+  throw new Error('No API key configured. Set MISTRAL_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY.')
 }
 
 // ── Anthropic direct ───────────────────────────────────────────────────────────
@@ -203,6 +206,84 @@ async function extractViaOpenRouter(
   if (result.error) throw new Error(`OpenRouter error: ${result.error.message}`)
 
   return parseExtraction(result.choices[0]?.message?.content?.trim() ?? '')
+}
+
+// ── Mistral OCR ────────────────────────────────────────────────────────────────
+
+interface MistralOcrResponse {
+  pages: { markdown: string; index: number }[]
+  error?: { message: string }
+}
+
+interface MistralChatResponse {
+  choices: { message: { content: string } }[]
+  error?: { message: string }
+}
+
+const MISTRAL_CHAT_MODEL = 'mistral-small-latest'
+
+async function extractViaMistral(
+  imageData: Uint8Array,
+  mimeType: string,
+  apiKey: string,
+): Promise<ExtractedData> {
+  const b64 = toBase64(imageData)
+  const isPdf = mimeType === 'application/pdf'
+
+  // Step 1: OCR — extract raw text from the image/PDF
+  const documentField = isPdf
+    ? { type: 'document_url', document_url: `data:application/pdf;base64,${b64}` }
+    : { type: 'image_url', image_url: `data:${mimeType};base64,${b64}` }
+
+  const ocrResponse = await fetch('https://api.mistral.ai/v1/ocr', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: 'mistral-ocr-latest',
+      document: documentField,
+    }),
+  })
+
+  if (!ocrResponse.ok) {
+    const text = await ocrResponse.text()
+    throw new Error(`Mistral OCR API error ${ocrResponse.status}: ${text}`)
+  }
+
+  const ocrResult = (await ocrResponse.json()) as MistralOcrResponse
+  if (ocrResult.error) throw new Error(`Mistral OCR error: ${ocrResult.error.message}`)
+
+  const ocrText = ocrResult.pages.map(p => p.markdown).join('\n\n').trim()
+  if (!ocrText) throw new Error('Mistral OCR returned no text from the document.')
+
+  // Step 2: Chat — parse OCR text into structured receipt JSON
+  const chatResponse = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: MISTRAL_CHAT_MODEL,
+      max_tokens: 1024,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: `Here is the OCR text extracted from a receipt:\n\n${ocrText}\n\nExtract the receipt data.` },
+      ],
+    }),
+  })
+
+  if (!chatResponse.ok) {
+    const text = await chatResponse.text()
+    throw new Error(`Mistral chat API error ${chatResponse.status}: ${text}`)
+  }
+
+  const chatResult = (await chatResponse.json()) as MistralChatResponse
+  if (chatResult.error) throw new Error(`Mistral chat error: ${chatResult.error.message}`)
+
+  return parseExtraction(chatResult.choices[0]?.message?.content?.trim() ?? '')
 }
 
 function parseExtraction(raw: string): ExtractedData {

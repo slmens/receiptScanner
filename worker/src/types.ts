@@ -1,9 +1,10 @@
 export interface Env {
   DB: D1Database
   RECEIPTS: R2Bucket
-  // Set one of these two — OPENROUTER_API_KEY takes priority if both are present
+  // Set one of these — MISTRAL_API_KEY > OPENROUTER_API_KEY > ANTHROPIC_API_KEY
   ANTHROPIC_API_KEY: string
   OPENROUTER_API_KEY: string
+  MISTRAL_API_KEY: string
   AUTH_SECRET: string
   JWT_SECRET: string
   // AES-256-GCM key for field-level encryption of sensitive D1 columns
