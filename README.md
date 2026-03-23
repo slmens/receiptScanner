@@ -1,14 +1,14 @@
 # Receipt Vault
 
 A self-hosted PWA for scanning, extracting, and archiving receipts and invoices.  
-Built on Cloudflare Pages + Workers + R2 + D1, powered by Claude Vision.
+Built on Cloudflare Pages + Workers + R2 + D1, powered by AI extraction.
 
 **Features**
 
 - Scan paper receipts with your phone camera or upload PDFs/images
-- Claude Vision extracts structured data (date, vendor, category, amounts, HST)
+- AI extracts structured data (date, vendor, category, amounts, HST)
 - Browse, search, and filter all archived receipts
-- Edit extracted data when Claude gets something wrong
+- Edit extracted data when extraction gets something wrong
 - Export any date range as an Excel file (with clickable links back to the app)
 - Works offline as a PWA — add to Home Screen on iOS/Android
 - Single-user passphrase authentication with JWT sessions
@@ -55,7 +55,7 @@ PROJECT_NAME=my-vault D1_NAME=my-vault R2_BUCKET=my-vault-images KV_TITLE=RATE_L
 ```
 
 The script will ask for:
-1. Your AI provider choice (Anthropic or OpenRouter) + API key
+1. Your AI provider choice + API key (Mistral is recommended)
 2. A passphrase you'll use to log in to the app
 
 Everything else (database, storage, encryption keys, JWT secret, rate-limit store) is created and configured automatically.
@@ -71,7 +71,7 @@ Everything else (database, storage, encryption keys, JWT secret, rate-limit stor
 | [Node.js](https://nodejs.org/) | 18+ |
 | [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/) | auto-installed by setup.sh |
 | [Cloudflare account](https://dash.cloudflare.com/sign-up) | free plan works |
-| Anthropic or [OpenRouter](https://openrouter.ai) API key | pay-as-you-go |
+| AI API key (Mistral recommended) | pay-as-you-go |
 
 ### Step 1 — Install dependencies
 
@@ -222,7 +222,7 @@ scanner/
     │   ├── auth.ts             Passphrase login, JWT sign/verify, rate limiting
     │   ├── crypto.ts           AES-256-GCM field-level encryption helpers
     │   ├── receipts.ts         Receipt CRUD, image serving, stats
-    │   ├── extract.ts          Claude Vision integration
+    │   ├── extract.ts          AI extraction integration
     │   ├── export.ts           Excel export endpoint
     │   ├── r2.ts               R2 storage helpers
     │   └── types.ts            TypeScript interfaces
@@ -325,7 +325,7 @@ All `/api/*` routes require `Authorization: Bearer <token>`.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/auth/login` | Exchange passphrase for JWT |
-| `POST` | `/api/receipts/extract` | Upload image → Claude extraction → temp R2 key |
+| `POST` | `/api/receipts/extract` | Upload image/PDF → AI extraction → temp R2 key |
 | `POST` | `/api/receipts` | Save receipt (finalises temp key from extract step) |
 | `GET`  | `/api/receipts` | List receipts (`from`, `to`, `category`, `limit`, `offset`) |
 | `GET`  | `/api/receipts/:id` | Get single receipt |
@@ -347,7 +347,7 @@ All `/api/*` routes require `Authorization: Bearer <token>`.
 | Cloudflare D1 | 5 GB, 5M reads/day | Free |
 | Cloudflare R2 | 10 GB storage, 10M reads | Free |
 | Cloudflare KV | 100k reads/day | Free |
-| Anthropic Claude | — | ~$0.30 USD |
+| AI provider usage | — | depends on provider/model |
 | **Total** | | **~$0.30/month** |
 
 ---
