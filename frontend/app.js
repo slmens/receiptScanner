@@ -1829,7 +1829,8 @@ const views = {
           }
         } catch (err) {
           counters.errors++
-          appendLog(`[${i + 1}] import error: ${err.message}`)
+          const detail = err?.data?.detail || err?.message || 'Unknown error'
+          appendLog(`[${i + 1}] import error: ${detail}`)
         }
 
         updateSummary(i + 1)

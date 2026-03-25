@@ -514,9 +514,7 @@ export async function importEmailHandler(c: AppContext) {
     fromName?: string | null
     fromAddress?: string | null
     date?: string | null
-    // Text path (most emails)
     textContent?: string | null
-    // Vision fallback (image-only emails)
     imageDataBase64?: string | null
     imageMimeType?: string | null
   }
@@ -530,61 +528,59 @@ export async function importEmailHandler(c: AppContext) {
   if (!body.source)   return c.json({ error: 'source is required' }, 400)
   if (!body.sourceId) return c.json({ error: 'sourceId is required' }, 400)
 
-  const encKey = await deriveEncryptionKey(c.env.ENCRYPTION_KEY)
+  try {
+    const encKey = await deriveEncryptionKey(c.env.ENCRYPTION_KEY)
 
-  // ── Dedupe: Message-IDs are globally unique (RFC 5322) so check source_id
-  // alone. This way re-imports with a different source tag (e.g. after
-  // Delivered-To detection reformats the label) are still correctly skipped.
-  const existing = await c.env.DB.prepare(
-    'SELECT id FROM receipts WHERE source_id = ? LIMIT 1',
-  )
-    .bind(body.sourceId)
-    .first<{ id: string }>()
-
-  if (existing) return c.json({ skipped: true, id: existing.id })
-
-  // ── Extraction ───────────────────────────────────────────────────────────────
-  let extracted
-  let imageKey: string
-  let mimeType: string
-
-  if (body.textContent && body.textContent.trim().length > 0) {
-    // Text path — cheapest, works for the vast majority of receipt emails
-    extracted = await extractFromText(
-      body.textContent,
-      {
-        subject:  body.subject  ?? undefined,
-        fromName: body.fromName ?? undefined,
-        date:     body.date     ?? undefined,
-      },
-      c.env,
+    // Message-IDs are globally unique (RFC 5322) — dedupe on source_id alone
+    // so re-imports with a reformatted source tag are still correctly skipped.
+    const existing = await c.env.DB.prepare(
+      'SELECT id FROM receipts WHERE source_id = ? LIMIT 1',
     )
-    // Store the text body in R2 so the detail view can show it
-    const id = crypto.randomUUID()
-    mimeType = 'text/plain'
-    imageKey = `receipts/${id}.txt`
-    const textBytes = new TextEncoder().encode(body.textContent)
-    await uploadToR2(c.env.RECEIPTS, imageKey, textBytes.buffer as ArrayBuffer, mimeType)
+      .bind(body.sourceId)
+      .first<{ id: string }>()
 
-    return c.json({ receipt: await saveImportedReceipt(c, encKey, id, imageKey, mimeType, extracted, body) }, 201)
+    if (existing) return c.json({ skipped: true, id: existing.id })
 
-  } else if (body.imageDataBase64 && body.imageMimeType) {
-    // Vision fallback — inline image attachment
-    const imgMime = canonicalMime(body.imageMimeType)
-    const binary = atob(body.imageDataBase64)
-    const bytes = new Uint8Array(binary.length)
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    let extracted
+    let imageKey: string
+    let mimeType: string
 
-    extracted = await extractReceipt(bytes, imgMime, c.env)
-    const id = crypto.randomUUID()
-    mimeType = imgMime
-    imageKey = buildImageKey(id, mimeType)
-    await uploadToR2(c.env.RECEIPTS, imageKey, bytes.buffer, mimeType)
+    if (body.textContent && body.textContent.trim().length > 0) {
+      extracted = await extractFromText(
+        body.textContent,
+        {
+          subject:  body.subject  ?? undefined,
+          fromName: body.fromName ?? undefined,
+          date:     body.date     ?? undefined,
+        },
+        c.env,
+      )
+      const id = crypto.randomUUID()
+      mimeType = 'text/plain'
+      imageKey = `receipts/${id}.txt`
+      const textBytes = new TextEncoder().encode(body.textContent)
+      await uploadToR2(c.env.RECEIPTS, imageKey, textBytes.buffer as ArrayBuffer, mimeType)
+      return c.json({ receipt: await saveImportedReceipt(c, encKey, id, imageKey, mimeType, extracted, body) }, 201)
 
-    return c.json({ receipt: await saveImportedReceipt(c, encKey, id, imageKey, mimeType, extracted, body) }, 201)
+    } else if (body.imageDataBase64 && body.imageMimeType) {
+      const imgMime = canonicalMime(body.imageMimeType)
+      const binary = atob(body.imageDataBase64)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      extracted = await extractReceipt(bytes, imgMime, c.env)
+      const id = crypto.randomUUID()
+      mimeType = imgMime
+      imageKey = buildImageKey(id, mimeType)
+      await uploadToR2(c.env.RECEIPTS, imageKey, bytes.buffer, mimeType)
+      return c.json({ receipt: await saveImportedReceipt(c, encKey, id, imageKey, mimeType, extracted, body) }, 201)
 
-  } else {
-    return c.json({ error: 'Either textContent or imageDataBase64+imageMimeType is required' }, 400)
+    } else {
+      return c.json({ error: 'Either textContent or imageDataBase64+imageMimeType is required' }, 400)
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    console.error('importEmailHandler error', body.sourceId, detail)
+    return c.json({ error: 'Import failed', detail }, 502)
   }
 }
 
