@@ -116,12 +116,22 @@ const api = {
     return this.request('POST', '/api/receipts/extract', fd, true)
   },
 
+  uploadReceiptImage(file) {
+    const fd = new FormData()
+    fd.append('file', file)
+    return this.request('POST', '/api/receipts/upload', fd, true)
+  },
+
   discardPending(imageKey) {
     return this.request('POST', '/api/receipts/discard', { imageKey })
   },
 
   createReceipt(data) {
     return this.request('POST', '/api/receipts', data)
+  },
+
+  importEmail(data) {
+    return this.request('POST', '/api/receipts/import', data)
   },
 
   listReceipts(filters = {}) {
@@ -209,6 +219,7 @@ const router = {
     { re: /^\/$/, view: 'home' },
     { re: /^\/scan$/, view: 'scan' },
     { re: /^\/browse$/, view: 'browse' },
+    { re: /^\/import$/, view: 'import' },
     { re: /^\/receipt\/([^/]+)$/, view: 'detail', param: 1 },
     { re: /^\/export$/, view: 'export' },
     { re: /^\/settings$/, view: 'settings' },
@@ -820,6 +831,15 @@ const views = {
 
     const stage = document.getElementById('scan-stage')
 
+    let flowMode = 'ai'
+    const pageTitle = this.main.querySelector('.page-title')
+
+    const setFlowMode = (mode) => {
+      flowMode = mode
+      if (!pageTitle) return
+      pageTitle.textContent = mode === 'manual' ? 'Add Receipt Manually' : 'Scan Receipt'
+    }
+
     // ── Upload zone (step 1) ───────────────────────────────────────────────────
 
     const showUploadZone = () => {
@@ -867,6 +887,10 @@ const views = {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
                 Analyze Receipt
               </button>
+              <button class="btn btn--secondary" id="btn-manual" title="Skip AI extraction and fill fields yourself">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                Add Manually
+              </button>
               <button class="btn btn--secondary" id="btn-camera">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                 Take Photo
@@ -876,6 +900,10 @@ const views = {
               <button class="btn btn--primary" id="btn-camera">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                 Take Photo
+              </button>
+              <button class="btn btn--secondary" id="btn-manual" title="Skip AI extraction and fill fields yourself">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                Add Manually
               </button>
               <button class="btn btn--secondary" id="btn-upload">Upload File</button>
             `}
@@ -930,7 +958,20 @@ const views = {
         }
       }
       if (document.getElementById('btn-extract')) {
-        document.getElementById('btn-extract').onclick = () => startExtraction()
+        document.getElementById('btn-extract').onclick = () => {
+          setFlowMode('ai')
+          startExtraction()
+        }
+      }
+      if (document.getElementById('btn-manual')) {
+        document.getElementById('btn-manual').onclick = async () => {
+          setFlowMode('manual')
+          if (scanState.files.length > 0) {
+            await startManualUploadAndReview()
+          } else {
+            triggerCapture(true)
+          }
+        }
       }
     }
 
@@ -970,7 +1011,11 @@ const views = {
         scanState.previews.push(preview)
         scanState.edits.push(edits)
       }
-      showUploadZone()
+      if (flowMode === 'manual') {
+        await startManualUploadAndReview()
+      } else {
+        showUploadZone()
+      }
     }
 
     const resetScan = async ({ discardRemote = false } = {}) => {
@@ -988,6 +1033,7 @@ const views = {
       scanState.imageKey = null
       scanState.extracted = null
       scanState.stitchedFile = null
+      setFlowMode('ai')
       showUploadZone()
     }
 
@@ -1107,6 +1153,67 @@ const views = {
 
     // ── Extraction ────────────────────────────────────────────────────────────
 
+    const startManualUploadAndReview = async () => {
+      if (!scanState.files.length) return
+
+      let fileToUpload
+      let previewToShow = null
+
+      scanState.stitchedFile = null
+
+      if (scanState.files.length === 1) {
+        fileToUpload = scanState.files[0]
+        previewToShow = scanState.previews[0]
+      } else {
+        // Stitch all photos into one tall JPEG for a better single-image archive.
+        stage.innerHTML = `
+          <div style="text-align:center;padding:48px 24px;color:var(--clr-text-3)">
+            <div class="spinner" style="margin:0 auto 16px"></div>
+            <div style="font-size:14px">Stitching ${scanState.files.length} photos…</div>
+          </div>
+        `
+        try {
+          fileToUpload = await imgUtils.stitch(scanState.files)
+          scanState.stitchedFile = fileToUpload
+          previewToShow = fileToUpload.type !== 'application/pdf'
+            ? await imgUtils.dataUrl(fileToUpload)
+            : null
+        } catch (err) {
+          toast.error('Failed to combine images: ' + err.message)
+          showUploadZone()
+          return
+        }
+      }
+
+      stage.innerHTML = /* html */`
+        <div class="scan-preview" id="scan-preview-wrap">
+          ${previewToShow
+            ? `<img src="${previewToShow}" class="scan-preview__image" alt="Receipt preview" />`
+            : `<div style="padding:64px;text-align:center;color:var(--clr-text-3)">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                <p style="margin-top:12px;font-size:14px">${fileToUpload.name}</p>
+              </div>`}
+          <div class="scan-preview__overlay">
+            <div class="scan-line"></div>
+            <div class="scan-status">
+              Uploading image
+              <span class="scan-status__dots"><span></span><span></span><span></span></span>
+            </div>
+          </div>
+        </div>
+      `
+
+      try {
+        const result = await api.uploadReceiptImage(fileToUpload)
+        scanState.imageKey = result.imageKey
+        scanState.extracted = null
+        showManualReviewForm(previewToShow)
+      } catch (err) {
+        toast.error(err.message)
+        showUploadZone()
+      }
+    }
+
     const startExtraction = async () => {
       if (!scanState.files.length) return
 
@@ -1169,6 +1276,166 @@ const views = {
           toast.error(err.message)
           showUploadZone()
         })
+    }
+
+    // ── Manual review form (step 2, no AI) ───────────────────────────────────
+
+    const showManualReviewForm = (previewUrl) => {
+      const d = {
+        date: new Date().toISOString().slice(0, 10),
+        vendor: '',
+        category: 'Other',
+        subtotal: null,
+        hst: null,
+        total: null,
+        payment_method: 'unknown',
+        invoice_number: null,
+        notes: null,
+      }
+
+      stage.innerHTML = /* html */`
+        ${previewUrl
+          ? `<div class="scan-preview" style="margin-bottom:24px">
+               <img src="${previewUrl}" class="scan-preview__image" alt="Receipt" />
+               ${scanState.files.length > 1
+                 ? `<div style="text-align:center;font-size:11px;color:var(--clr-text-3);padding:6px 0">
+                      ${scanState.files.length} photos stitched · scroll to view full receipt
+                    </div>`
+                 : ''}
+             </div>`
+          : ''}
+        <div class="extracted-form">
+          <div class="extracted-form__header">
+            <span class="extracted-form__header-title">Manual Entry</span>
+            <span class="extracted-badge">✓ Image captured</span>
+          </div>
+          <form id="save-form" class="extracted-form__body">
+            <div class="form-grid">
+              <div class="field">
+                <label class="field__label" for="f-date">Date</label>
+                <input class="field__input field__input--mono" type="date" id="f-date" name="date" value="${fmt.dateInput(d.date)}" required />
+              </div>
+              <div class="field">
+                <label class="field__label" for="f-vendor">Vendor</label>
+                <input class="field__input" type="text" id="f-vendor" name="vendor" value="${escHtml(d.vendor)}" required />
+              </div>
+              <div class="field span-2">
+                <label class="field__label" for="f-category">Category</label>
+                <select class="field__select" id="f-category" name="category">
+                  ${CATEGORIES.map(c => `<option value="${c}"${c === d.category ? ' selected' : ''}>${c}</option>`).join('')}
+                </select>
+              </div>
+            </div>
+            <div class="form-grid form-grid--3">
+              <div class="field">
+                <label class="field__label" for="f-subtotal">Subtotal</label>
+                <input class="field__input field__input--mono" type="number" id="f-subtotal" name="subtotal" step="0.01" value="${d.subtotal ?? ''}" placeholder="—" />
+              </div>
+              <div class="field">
+                <label class="field__label" for="f-hst">HST (13%)</label>
+                <input class="field__input field__input--mono" type="number" id="f-hst" name="hst" step="0.01" value="${d.hst ?? ''}" placeholder="—" />
+              </div>
+              <div class="field">
+                <label class="field__label" for="f-total">Total *</label>
+                <input class="field__input field__input--mono" type="number" id="f-total" name="total" step="0.01" value="${d.total ?? ''}" required />
+              </div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label class="field__label" for="f-payment">Payment</label>
+                <select class="field__select" id="f-payment" name="payment">
+                  ${PAYMENT_METHODS.map(m => `<option value="${m}"${m === d.payment_method ? ' selected' : ''}>${fmt.capitalize(m)}</option>`).join('')}
+                </select>
+              </div>
+              <div class="field">
+                <label class="field__label" for="f-invoice">Invoice #</label>
+                <input class="field__input" type="text" id="f-invoice" name="invoice" value="${escHtml(d.invoice_number ?? '')}" placeholder="Optional" />
+              </div>
+              <div class="field span-2">
+                <label class="field__label" for="f-notes">Notes</label>
+                <textarea class="field__textarea" id="f-notes" name="notes" rows="2" placeholder="Optional">${escHtml(d.notes ?? '')}</textarea>
+              </div>
+            </div>
+          </form>
+          <div class="extracted-form__actions">
+            <button class="btn btn--ghost" id="btn-discard" type="button">Discard</button>
+            <button class="btn btn--primary" id="btn-save" type="button">Save Receipt</button>
+          </div>
+        </div>
+      `
+
+      document.getElementById('btn-discard').onclick = () => {
+        resetScan({ discardRemote: true })
+      }
+
+      document.getElementById('btn-save').onclick = async () => {
+        const form = document.getElementById('save-form')
+        if (!form.checkValidity()) { form.reportValidity(); return }
+
+        const btn = document.getElementById('btn-save')
+        btn.disabled = true
+        btn.innerHTML = '<span class="spinner"></span> Saving…'
+
+        const uploadedFile = scanState.stitchedFile ?? scanState.files[0]
+
+        try {
+          const payload = {
+            imageKey:         scanState.imageKey,
+            originalFilename: uploadedFile.name,
+            mimeType:         uploadedFile.type,
+            date:             document.getElementById('f-date').value,
+            vendor:           document.getElementById('f-vendor').value,
+            category:         document.getElementById('f-category').value,
+            subtotal:         parseFloatOrNull(document.getElementById('f-subtotal').value),
+            hst:              parseFloatOrNull(document.getElementById('f-hst').value),
+            total:            parseFloat(document.getElementById('f-total').value),
+            paymentMethod:    document.getElementById('f-payment').value,
+            invoiceNumber:    document.getElementById('f-invoice').value || null,
+            notes:            document.getElementById('f-notes').value || null,
+          }
+
+          await api.createReceipt(payload)
+          toast.success('Receipt saved!')
+          resetScan()
+        } catch (err) {
+          if (err.status === 409 && err.data?.duplicates?.length) {
+            const preview = err.data.duplicates
+              .map(d => `${d.vendor} · ${fmt.date(d.date)} · ${fmt.currency(d.total)}`)
+              .join('\n')
+            const proceed = confirm(
+              `Possible duplicate receipt detected:\n\n${preview}\n\nSave anyway?`,
+            )
+            if (proceed) {
+              try {
+                await api.createReceipt({
+                  imageKey:         scanState.imageKey,
+                  originalFilename: uploadedFile.name,
+                  mimeType:         uploadedFile.type,
+                  date:             document.getElementById('f-date').value,
+                  vendor:           document.getElementById('f-vendor').value,
+                  category:         document.getElementById('f-category').value,
+                  subtotal:         parseFloatOrNull(document.getElementById('f-subtotal').value),
+                  hst:              parseFloatOrNull(document.getElementById('f-hst').value),
+                  total:            parseFloat(document.getElementById('f-total').value),
+                  paymentMethod:    document.getElementById('f-payment').value,
+                  invoiceNumber:    document.getElementById('f-invoice').value || null,
+                  notes:            document.getElementById('f-notes').value || null,
+                  confirmDuplicate: true,
+                })
+                toast.success('Receipt saved!')
+                resetScan()
+                return
+              } catch (retryErr) {
+                toast.error(retryErr.message)
+              }
+            }
+          } else {
+            toast.error(err.message)
+          }
+          btn.disabled = false
+          btn.textContent = 'Save Receipt'
+        }
+      }
     }
 
     // ── Review form (step 3) ──────────────────────────────────────────────────
@@ -1322,6 +1589,248 @@ const views = {
     }
 
     showUploadZone()
+  },
+
+  // ── Import ────────────────────────────────────────────────────────────────────
+
+  async import() {
+    this.main.innerHTML = /* html */`
+      <div class="scan-view">
+        <div class="page-header">
+          <h1 class="page-title">Import Emails</h1>
+        </div>
+        <div id="import-stage"></div>
+      </div>
+    `
+
+    const stage = document.getElementById('import-stage')
+    const state = {
+      files: [],
+      messages: [],
+      stopRequested: false,
+      running: false,
+      parsedCount: 0,
+    }
+
+    const renderEmpty = () => {
+      stage.innerHTML = /* html */`
+        <div class="upload-zone" id="import-zone">
+          <div class="upload-zone__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </div>
+          <h2 class="upload-zone__title">Drop .mbox or .eml files here</h2>
+          <p class="upload-zone__sub">Takeout .mbox for bulk import, or one/many .eml files.</p>
+          <p class="upload-zone__sub" style="margin-top:8px">Emails already imported will be skipped automatically.</p>
+          <div class="upload-zone__actions">
+            <button class="btn btn--primary" id="btn-upload-mbox">Upload .mbox</button>
+            <button class="btn btn--secondary" id="btn-upload-eml">Upload .eml files</button>
+          </div>
+        </div>
+      `
+
+      const zone = document.getElementById('import-zone')
+      zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over') })
+      zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'))
+      zone.addEventListener('drop', e => {
+        e.preventDefault()
+        zone.classList.remove('drag-over')
+        if (e.dataTransfer.files.length) {
+          handleSelectedFiles(Array.from(e.dataTransfer.files))
+        }
+      })
+
+      document.getElementById('btn-upload-mbox').onclick = () => pickFiles('.mbox,.eml', false)
+      document.getElementById('btn-upload-eml').onclick = () => pickFiles('.eml', true)
+    }
+
+    const renderReady = () => {
+      stage.innerHTML = /* html */`
+        <div class="card" style="padding:24px">
+          <div style="font-size:14px;color:var(--clr-text-2);margin-bottom:6px">Ready to import</div>
+          <div style="font-size:20px;font-weight:600;margin-bottom:8px">${state.messages.length} email message${state.messages.length !== 1 ? 's' : ''}</div>
+          <div style="font-size:13px;color:var(--clr-text-3);margin-bottom:20px">Parsed from ${state.files.length} selected file${state.files.length !== 1 ? 's' : ''}.</div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn--primary" id="btn-start-import">Start Import</button>
+            <button class="btn btn--ghost" id="btn-reset-import">Choose Different Files</button>
+          </div>
+        </div>
+      `
+
+      document.getElementById('btn-start-import').onclick = () => runImport()
+      document.getElementById('btn-reset-import').onclick = () => {
+        state.files = []
+        state.messages = []
+        state.stopRequested = false
+        state.running = false
+        state.parsedCount = 0
+        renderEmpty()
+      }
+    }
+
+    const renderProgress = () => {
+      stage.innerHTML = /* html */`
+        <div class="card" style="padding:20px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px">
+            <div>
+              <div style="font-size:14px;color:var(--clr-text-2)">Import in progress</div>
+              <div id="import-progress-text" style="font-size:18px;font-weight:600">Importing 0 / ${state.messages.length}</div>
+            </div>
+            <button class="btn btn--ghost btn--sm" id="btn-stop-import">Stop</button>
+          </div>
+          <div style="height:8px;background:var(--clr-surface-2);border-radius:999px;overflow:hidden;margin-bottom:14px">
+            <div id="import-progress-bar" style="height:100%;width:0;background:var(--clr-accent);transition:width .2s ease"></div>
+          </div>
+          <div id="import-summary" style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--clr-text-3);margin-bottom:12px"></div>
+          <div id="import-log" style="max-height:360px;overflow:auto;border:1px solid var(--clr-border);border-radius:12px;padding:10px;background:var(--clr-surface-1);font-size:12px;font-family:var(--font-mono)"></div>
+        </div>
+      `
+      document.getElementById('btn-stop-import').onclick = () => {
+        state.stopRequested = true
+      }
+    }
+
+    const pickFiles = (accept, multiple) => {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.accept = accept
+      if (multiple) input.multiple = true
+      input.onchange = () => {
+        const files = Array.from(input.files || [])
+        if (files.length) handleSelectedFiles(files)
+      }
+      input.click()
+    }
+
+    const handleSelectedFiles = async files => {
+      try {
+        stage.innerHTML = `
+          <div class="empty-state" style="padding:48px 0">
+            <span class="spinner"></span>
+            <div style="margin-top:12px;font-size:13px;color:var(--clr-text-3)">Parsing selected email file(s)…</div>
+          </div>
+        `
+        state.files = files
+        state.messages = []
+        state.parsedCount = 0
+
+        for (const file of files) {
+          const name = file.name.toLowerCase()
+          if (name.endsWith('.mbox')) {
+            const raw = await file.text()
+            const parts = splitMboxMessages(raw)
+            parts.forEach((msg, idx) => {
+              state.messages.push({ raw: msg, sourceFile: file.name, indexInFile: idx })
+            })
+          } else if (name.endsWith('.eml') || file.type === 'message/rfc822' || file.type === 'text/plain') {
+            const raw = await file.text()
+            state.messages.push({ raw, sourceFile: file.name, indexInFile: 0 })
+          }
+        }
+
+        if (state.messages.length === 0) {
+          toast.error('No .mbox or .eml messages found in selected files.')
+          renderEmpty()
+          return
+        }
+        renderReady()
+      } catch (err) {
+        toast.error('Failed to parse selected files: ' + err.message)
+        renderEmpty()
+      }
+    }
+
+    const runImport = async () => {
+      state.running = true
+      state.stopRequested = false
+      renderProgress()
+
+      const progressText = document.getElementById('import-progress-text')
+      const progressBar = document.getElementById('import-progress-bar')
+      const summaryEl = document.getElementById('import-summary')
+      const logEl = document.getElementById('import-log')
+
+      const counters = { imported: 0, skipped: 0, errors: 0 }
+      const appendLog = line => {
+        const row = document.createElement('div')
+        row.textContent = line
+        logEl.prepend(row)
+      }
+      const updateSummary = done => {
+        progressText.textContent = `Importing ${done} / ${state.messages.length}`
+        progressBar.style.width = `${Math.min(100, Math.round((done / Math.max(1, state.messages.length)) * 100))}%`
+        summaryEl.textContent = `Imported: ${counters.imported}  |  Skipped: ${counters.skipped}  |  Errors: ${counters.errors}`
+      }
+
+      const PostalMime = (await import('https://esm.sh/postal-mime')).default
+
+      for (let i = 0; i < state.messages.length; i++) {
+        if (state.stopRequested) break
+        const item = state.messages[i]
+        let parsed
+        try {
+          parsed = await PostalMime.parse(item.raw, { attachmentEncoding: 'base64' })
+        } catch (err) {
+          counters.errors++
+          appendLog(`[${i + 1}] parse error (${item.sourceFile}): ${err.message}`)
+          updateSummary(i + 1)
+          continue
+        }
+
+        const preferredAttachment = (parsed.attachments || []).find(a => {
+          const mime = (a.mimeType || '').toLowerCase()
+          return mime === 'application/pdf' || mime.startsWith('image/')
+        })
+
+        let sourceId = (parsed.messageId || '').trim()
+        if (!sourceId) {
+          sourceId = await stableMessageId(item.raw, item.sourceFile, i)
+        }
+
+        const payload = {
+          source: 'gmail',
+          sourceId,
+          date: parsed.date ? fmt.dateInput(parsed.date) : null,
+          fromAddress: parsed.from?.address ?? null,
+          fromName: parsed.from?.name ?? null,
+          subject: parsed.subject ?? null,
+          htmlBody: parsed.html ?? null,
+          textBody: parsed.text ?? null,
+          attachment: preferredAttachment
+            ? {
+                filename: preferredAttachment.filename ?? null,
+                mimeType: preferredAttachment.mimeType ?? null,
+                dataBase64: typeof preferredAttachment.content === 'string' ? preferredAttachment.content : null,
+              }
+            : null,
+        }
+
+        try {
+          const res = await api.importEmail(payload)
+          const vendor = res.receipt?.vendor || parsed.from?.name || parsed.from?.address || 'Unknown'
+          const amount = res.receipt?.total != null ? fmt.currency(res.receipt.total) : '—'
+          if (res.skipped) {
+            counters.skipped++
+            appendLog(`[${i + 1}] ${vendor} · skipped (duplicate)`)
+          } else {
+            counters.imported++
+            appendLog(`[${i + 1}] ${vendor} · ${amount} · imported`)
+          }
+        } catch (err) {
+          counters.errors++
+          appendLog(`[${i + 1}] import error: ${err.message}`)
+        }
+
+        updateSummary(i + 1)
+        await sleep(80)
+      }
+
+      const done = counters.imported + counters.skipped + counters.errors
+      updateSummary(done)
+      state.running = false
+      toast.success(`Import complete. Imported ${counters.imported}, skipped ${counters.skipped}, errors ${counters.errors}.`)
+    }
+
+    renderEmpty()
   },
 
   // ── Browse ────────────────────────────────────────────────────────────────────
@@ -2024,6 +2533,35 @@ function escHtml(str) {
 function parseFloatOrNull(str) {
   const n = parseFloat(str)
   return isNaN(n) ? null : n
+}
+
+function splitMboxMessages(raw) {
+  const normalized = String(raw ?? '').replace(/\r\n/g, '\n')
+  if (!normalized.trim()) return []
+
+  const chunks = normalized.split(/\n(?=From [^\n]*\n)/g)
+  const out = []
+
+  for (const chunk of chunks) {
+    if (!chunk.trim()) continue
+    // Remove mbox envelope line, keep RFC822 content
+    const message = chunk.replace(/^From [^\n]*\n/, '')
+    if (message.trim()) out.push(message)
+  }
+  return out
+}
+
+async function stableMessageId(raw, sourceFile, idx) {
+  const text = `${sourceFile}|${idx}|${String(raw).slice(0, 2048)}`
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  const hex = Array.from(new Uint8Array(digest))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+  return `<vault-import-${hex.slice(0, 32)}>`
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 // ── Service Worker registration ─────────────────────────────────────────────────
