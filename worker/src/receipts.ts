@@ -532,11 +532,13 @@ export async function importEmailHandler(c: AppContext) {
 
   const encKey = await deriveEncryptionKey(c.env.ENCRYPTION_KEY)
 
-  // ── Dedupe: if this message was already imported, skip immediately ────────────
+  // ── Dedupe: Message-IDs are globally unique (RFC 5322) so check source_id
+  // alone. This way re-imports with a different source tag (e.g. after
+  // Delivered-To detection reformats the label) are still correctly skipped.
   const existing = await c.env.DB.prepare(
-    'SELECT id FROM receipts WHERE source = ? AND source_id = ? LIMIT 1',
+    'SELECT id FROM receipts WHERE source_id = ? LIMIT 1',
   )
-    .bind(body.source, body.sourceId)
+    .bind(body.sourceId)
     .first<{ id: string }>()
 
   if (existing) return c.json({ skipped: true, id: existing.id })

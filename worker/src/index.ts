@@ -116,6 +116,16 @@ app.get('/api/receipts/:id/image', serveImageHandler)
 app.get('/api/stats', getStatsHandler)
 app.get('/api/export', exportHandler)
 
+// Distinct import sources — used by the export UI to build source filter checkboxes
+app.get('/api/sources', async c => {
+  const rows = await c.env.DB.prepare(
+    `SELECT DISTINCT source FROM receipts
+     WHERE source IS NOT NULL AND deleted_at IS NULL
+     ORDER BY source ASC`,
+  ).all<{ source: string }>()
+  return c.json({ sources: rows.results.map(r => r.source) })
+})
+
 // ── 404 handler ────────────────────────────────────────────────────────────────
 
 app.notFound(c => c.json({ error: 'Not found' }, 404))

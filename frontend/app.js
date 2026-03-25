@@ -134,6 +134,10 @@ const api = {
     return this.request('POST', '/api/receipts/import', data)
   },
 
+  getSources() {
+    return this.request('GET', '/api/sources')
+  },
+
   listReceipts(filters = {}) {
     const params = new URLSearchParams()
     Object.entries(filters).forEach(([k, v]) => { if (v) params.set(k, String(v)) })
@@ -1610,6 +1614,7 @@ const views = {
       stopRequested: false,
       running: false,
       parsedCount: 0,
+      deliveredTo: null,  // detected from Delivered-To header
     }
 
     const renderEmpty = () => {
@@ -1644,11 +1649,18 @@ const views = {
     }
 
     const renderReady = () => {
+      const accountBadge = state.deliveredTo
+        ? `<div style="display:inline-flex;align-items:center;gap:6px;background:var(--clr-surface-2);border:1px solid var(--clr-border);border-radius:8px;padding:6px 12px;font-size:13px;color:var(--clr-text-2);margin-bottom:20px">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            ${escHtml(state.deliveredTo)}
+          </div>`
+        : ''
       stage.innerHTML = /* html */`
         <div class="card" style="padding:24px">
           <div style="font-size:14px;color:var(--clr-text-2);margin-bottom:6px">Ready to import</div>
           <div style="font-size:20px;font-weight:600;margin-bottom:8px">${state.messages.length} email message${state.messages.length !== 1 ? 's' : ''}</div>
-          <div style="font-size:13px;color:var(--clr-text-3);margin-bottom:20px">Parsed from ${state.files.length} selected file${state.files.length !== 1 ? 's' : ''}.</div>
+          <div style="font-size:13px;color:var(--clr-text-3);margin-bottom:12px">Parsed from ${state.files.length} selected file${state.files.length !== 1 ? 's' : ''}.</div>
+          ${accountBadge}
           <div style="display:flex;gap:10px;flex-wrap:wrap">
             <button class="btn btn--primary" id="btn-start-import">Start Import</button>
             <button class="btn btn--ghost" id="btn-reset-import">Choose Different Files</button>
@@ -1712,6 +1724,7 @@ const views = {
         state.files = files
         state.messages = []
         state.parsedCount = 0
+        state.deliveredTo = null
 
         for (const file of files) {
           const name = file.name.toLowerCase()
@@ -1732,6 +1745,11 @@ const views = {
           renderEmpty()
           return
         }
+
+        // Detect which Gmail account this Takeout belongs to
+        const firstRaw = state.messages[0]?.raw || ''
+        state.deliveredTo = extractDeliveredTo(firstRaw)
+
         renderReady()
       } catch (err) {
         toast.error('Failed to parse selected files: ' + err.message)
@@ -1786,7 +1804,7 @@ const views = {
         const imageFallback = textContent.length < 30 ? emailToImage(parsed) : null
 
         const payload = {
-          source: 'gmail',
+          source: state.deliveredTo ? `gmail:${state.deliveredTo}` : 'gmail',
           sourceId,
           subject:     parsed.subject ?? null,
           fromName:    parsed.from?.name ?? null,
@@ -2177,14 +2195,16 @@ const views = {
               ${CATEGORIES.map(c => `<option value="${c}">${c}</option>`).join('')}
             </select>
           </div>
-          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:var(--sp-5);font-size:14px;color:var(--clr-text-2)">
-            <input type="checkbox" id="ex-include-imports" style="width:16px;height:16px;accent-color:var(--clr-accent);cursor:pointer" />
-            Include email imports (Gmail / Takeout)
-          </label>
+          <div id="ex-sources-wrap" style="margin-bottom:var(--sp-5)">
+            <div class="field__label" style="margin-bottom:8px">Source</div>
+            <div id="ex-sources-list">
+              <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--clr-text-2);cursor:pointer">
+                <input type="radio" name="ex-source" value="scanned" checked style="accent-color:var(--clr-accent)" />
+                Scanned receipts only
+              </label>
+            </div>
+          </div>
           <button class="btn btn--secondary btn--full" id="btn-preview">Preview</button>
-          <p style="margin-top:var(--sp-4);margin-bottom:0;font-size:12px;color:var(--clr-text-3);text-align:center;line-height:1.5">
-            By default only scanned physical receipts are exported. Tick the box above to also include email imports.
-          </p>
         </div>
 
         <div id="export-preview" class="export-preview" style="display:none">
@@ -2208,17 +2228,39 @@ const views = {
 
     let exportData = null
 
+    // Load available import sources and render radio buttons
+    api.getSources().then(({ sources }) => {
+      if (!sources || sources.length === 0) return
+      const list = document.getElementById('ex-sources-list')
+      if (!list) return
+      sources.forEach(src => {
+        const label = src.startsWith('gmail:') ? src.replace('gmail:', '') : src
+        const opt = document.createElement('label')
+        opt.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:14px;color:var(--clr-text-2);cursor:pointer;margin-top:6px'
+        opt.innerHTML = `<input type="radio" name="ex-source" value="${escHtml(src)}" style="accent-color:var(--clr-accent)" /> ${escHtml(label)}`
+        list.appendChild(opt)
+      })
+      // "All" option
+      const allOpt = document.createElement('label')
+      allOpt.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:14px;color:var(--clr-text-2);cursor:pointer;margin-top:6px'
+      allOpt.innerHTML = `<input type="radio" name="ex-source" value="all" style="accent-color:var(--clr-accent)" /> All (scanned + all email imports)`
+      list.appendChild(allOpt)
+    }).catch(() => {})
+
     document.getElementById('btn-preview').onclick = async () => {
       const btn = document.getElementById('btn-preview')
       btn.disabled = true
       btn.innerHTML = '<span class="spinner"></span> Loading…'
 
       try {
+        const sourceVal = document.querySelector('input[name="ex-source"]:checked')?.value || 'scanned'
         const filters = {
-          from:            document.getElementById('ex-from').value,
-          to:              document.getElementById('ex-to').value,
-          category:        document.getElementById('ex-cat').value,
-          include_imports: document.getElementById('ex-include-imports').checked ? '1' : '',
+          from:     document.getElementById('ex-from').value,
+          to:       document.getElementById('ex-to').value,
+          category: document.getElementById('ex-cat').value,
+          ...(sourceVal === 'scanned' ? {} :
+              sourceVal === 'all'     ? { include_imports: '1' } :
+                                        { source: sourceVal }),
         }
         const data = await api.exportReceipts(filters)
         exportData = data.receipts
@@ -2726,6 +2768,16 @@ const pwa = (() => {
 })()
 
 // ── Email import helpers ───────────────────────────────────────────────────────
+
+/**
+ * Extract the Delivered-To address from a raw email string.
+ * Present in all Gmail/Google Takeout exports — identifies which account
+ * the email was delivered to, used as the import source tag.
+ */
+function extractDeliveredTo(rawEmail) {
+  const match = rawEmail.match(/^Delivered-To:\s*(.+)$/im)
+  return match ? match[1].trim().toLowerCase() : null
+}
 
 /**
  * Extract plain text from an email parsed by PostalMime.
