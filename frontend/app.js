@@ -1840,7 +1840,57 @@ const views = {
       const done = counters.imported + counters.skipped + counters.errors
       updateSummary(done)
       state.running = false
-      toast.success(`Import complete. Imported ${counters.imported}, skipped ${counters.skipped}, errors ${counters.errors}.`)
+
+      const wasStoped = state.stopRequested
+      renderDone(counters, wasStoped)
+    }
+
+    const renderDone = (counters, wasStopped) => {
+      const hasErrors = counters.errors > 0
+      const iconColor = hasErrors ? 'var(--clr-warning, #f5a623)' : 'var(--clr-success, #4caf76)'
+      const icon = wasStopped
+        ? `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`
+        : hasErrors
+          ? `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`
+          : `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`
+
+      const headline = wasStopped ? 'Import stopped' : 'Import complete'
+
+      const stats = [
+        { label: 'Imported', value: counters.imported, color: 'var(--clr-accent)' },
+        { label: 'Skipped (duplicate)', value: counters.skipped, color: 'var(--clr-text-3)' },
+        { label: 'Errors', value: counters.errors, color: hasErrors ? 'var(--clr-error, #e05252)' : 'var(--clr-text-3)' },
+      ]
+
+      stage.innerHTML = /* html */`
+        <div class="card" style="padding:28px;text-align:center">
+          <div style="color:${iconColor};margin-bottom:12px">${icon}</div>
+          <div style="font-size:20px;font-weight:700;margin-bottom:6px">${headline}</div>
+          <div style="font-size:13px;color:var(--clr-text-3);margin-bottom:24px">
+            ${wasStopped ? 'You stopped the import early.' : 'All emails have been processed.'}
+          </div>
+          <div style="display:flex;justify-content:center;gap:24px;margin-bottom:28px;flex-wrap:wrap">
+            ${stats.map(s => `
+              <div style="text-align:center">
+                <div style="font-size:28px;font-weight:700;color:${s.color}">${s.value}</div>
+                <div style="font-size:12px;color:var(--clr-text-3);margin-top:2px">${s.label}</div>
+              </div>
+            `).join('')}
+          </div>
+          <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+            <button class="btn btn--primary" id="btn-done-browse">Browse receipts</button>
+            <button class="btn btn--ghost" id="btn-done-more">Import more files</button>
+          </div>
+        </div>
+      `
+
+      document.getElementById('btn-done-browse').onclick = () => router.navigate('/browse')
+      document.getElementById('btn-done-more').onclick = () => {
+        state.messages = []
+        state.stopRequested = false
+        state.deliveredTo = null
+        renderEmpty()
+      }
     }
 
     renderEmpty()
