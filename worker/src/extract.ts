@@ -19,9 +19,9 @@ function toBase64(data: Uint8Array): string {
   return btoa(binary)
 }
 
-const SYSTEM_PROMPT = `You are a receipt and invoice data extractor. Extract all available information from the provided receipt or invoice image and return it as valid JSON only.
+const SYSTEM_PROMPT = `You are a receipt and invoice data extractor. Extract all available information from the provided receipt or invoice and return it as valid JSON only.
 
-The image may be a long receipt photographed in multiple parts and stitched together vertically. Treat the entire image as one single receipt and extract the combined totals.
+The document may be a physical receipt photo, a PDF invoice, or an email receipt/trip summary from a service like Uber, Lyft, DoorDash, etc.
 
 Return a single JSON object with exactly these fields:
 {
@@ -33,7 +33,7 @@ Return a single JSON object with exactly these fields:
   "total": 0.00,
   "payment_method": "cash|debit|credit|e-transfer|unknown",
   "invoice_number": "INV-123 or null",
-  "notes": "Any relevant notes or null"
+  "notes": "See notes rules below"
 }
 
 Valid categories (pick the closest match):
@@ -47,11 +47,17 @@ Rules:
 - If the date is missing or illegible, use today's date.
 - If the vendor name is unclear, make your best guess from any visible text or logo.
 - Prefer the printed final total over any inferred arithmetic if they conflict.
-- If subtotal, HST, invoice number, or notes are not visible, return null for those nullable fields.
+- If subtotal or HST are not visible, return null for those fields.
 - If payment method is not visible, return "unknown".
 - subtotal and hst may be null if only the final total is visible.
-- total must always be a number greater than 0.
-- Output ONLY the raw JSON object. No markdown, no code fences, no explanation.`
+- total should be the amount actually charged (after discounts/credits). May be 0 if fully covered by credits.
+- Output ONLY the raw JSON object. No markdown, no code fences, no explanation.
+
+Notes field rules (always populate if any of these are present, otherwise null):
+- Ride/transport receipts: include pickup location → dropoff location, driver name, vehicle, distance, and any promotions or credits applied (e.g. "From: Airport → Downtown. Driver: John D. Distance: 12 km. Uber One credit: -$0.60. Promo: -$1.07").
+- Food delivery: include restaurant name if different from vendor, delivery address, and any discounts.
+- Any receipt: include invoice/order reference numbers, discount codes, membership credits, or split-payment details not captured in other fields.
+- Do NOT include generic commentary like "this is not a payment receipt" — just extract what is there.`
 
 // OpenRouter uses the OpenAI-compatible chat completions API
 const OPENROUTER_MODEL = 'anthropic/claude-sonnet-4-6'
