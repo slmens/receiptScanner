@@ -2197,10 +2197,11 @@ const views = {
           </div>
           <div id="ex-sources-wrap" style="margin-bottom:var(--sp-5)">
             <div class="field__label" style="margin-bottom:8px">Source</div>
-            <div id="ex-sources-list">
-              <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--clr-text-2);cursor:pointer">
-                <input type="radio" name="ex-source" value="scanned" checked style="accent-color:var(--clr-accent)" />
-                Scanned receipts only
+            <div id="ex-sources-list" style="display:flex;flex-direction:column;gap:8px">
+              <label style="display:flex;align-items:center;gap:10px;font-size:14px;color:var(--clr-text-2);cursor:pointer;user-select:none">
+                <input type="checkbox" class="ex-src-cb" data-src="scanned" checked
+                  style="width:16px;height:16px;accent-color:var(--clr-accent);cursor:pointer;flex-shrink:0" />
+                Scanned receipts
               </label>
             </div>
           </div>
@@ -2228,7 +2229,7 @@ const views = {
 
     let exportData = null
 
-    // Load available import sources and render radio buttons
+    // Load available import sources and render checkboxes
     api.getSources().then(({ sources }) => {
       if (!sources || sources.length === 0) return
       const list = document.getElementById('ex-sources-list')
@@ -2236,15 +2237,12 @@ const views = {
       sources.forEach(src => {
         const label = src.startsWith('gmail:') ? src.replace('gmail:', '') : src
         const opt = document.createElement('label')
-        opt.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:14px;color:var(--clr-text-2);cursor:pointer;margin-top:6px'
-        opt.innerHTML = `<input type="radio" name="ex-source" value="${escHtml(src)}" style="accent-color:var(--clr-accent)" /> ${escHtml(label)}`
+        opt.style.cssText = 'display:flex;align-items:center;gap:10px;font-size:14px;color:var(--clr-text-2);cursor:pointer;user-select:none'
+        opt.innerHTML = `<input type="checkbox" class="ex-src-cb" data-src="${escHtml(src)}"
+          style="width:16px;height:16px;accent-color:var(--clr-accent);cursor:pointer;flex-shrink:0" />
+          ${escHtml(label)}`
         list.appendChild(opt)
       })
-      // "All" option
-      const allOpt = document.createElement('label')
-      allOpt.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:14px;color:var(--clr-text-2);cursor:pointer;margin-top:6px'
-      allOpt.innerHTML = `<input type="radio" name="ex-source" value="all" style="accent-color:var(--clr-accent)" /> All (scanned + all email imports)`
-      list.appendChild(allOpt)
     }).catch(() => {})
 
     document.getElementById('btn-preview').onclick = async () => {
@@ -2253,14 +2251,16 @@ const views = {
       btn.innerHTML = '<span class="spinner"></span> Loading…'
 
       try {
-        const sourceVal = document.querySelector('input[name="ex-source"]:checked')?.value || 'scanned'
+        const checked = [...document.querySelectorAll('.ex-src-cb:checked')]
+        const wantScanned = checked.some(el => el.dataset.src === 'scanned')
+        const emailSources = checked.filter(el => el.dataset.src !== 'scanned').map(el => el.dataset.src)
+
         const filters = {
           from:     document.getElementById('ex-from').value,
           to:       document.getElementById('ex-to').value,
           category: document.getElementById('ex-cat').value,
-          ...(sourceVal === 'scanned' ? {} :
-              sourceVal === 'all'     ? { include_imports: '1' } :
-                                        { source: sourceVal }),
+          ...(wantScanned ? { scanned: '1' } : {}),
+          ...(emailSources.length > 0 ? { sources: emailSources.join(',') } : {}),
         }
         const data = await api.exportReceipts(filters)
         exportData = data.receipts

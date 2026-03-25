@@ -13,20 +13,35 @@ type AppContext = Context<{ Bindings: Env; Variables: Variables }>
  * Note: vendor filter is not supported — vendor names are encrypted at rest.
  */
 export async function exportHandler(c: AppContext) {
-  const { from, to, category, include_imports, source } = c.req.query()
+  const { from, to, category, sources: sourcesParam, scanned } = c.req.query()
 
   const conditions = ['deleted_at IS NULL']
   const params: (string | number)[] = []
 
-  if (source) {
-    // Exact source match — e.g. "gmail:tubatunc@gmail.com" or "gmail:work@co.com"
-    conditions.push('source = ?')
-    params.push(source)
-  } else if (include_imports !== '1') {
-    // Default: only scanned physical receipts (source IS NULL)
+  // Source filtering:
+  //   sources=gmail:a@x.com,gmail:b@y.com  → specific email accounts (comma-separated)
+  //   scanned=1                             → include source IS NULL rows
+  //   (no params)                           → scanned only (default safe behaviour)
+  const wantScanned = scanned === '1'
+  const wantSources = sourcesParam ? sourcesParam.split(',').map(s => s.trim()).filter(Boolean) : []
+
+  if (wantSources.length > 0 && wantScanned) {
+    // Mix: scanned + selected email accounts
+    const placeholders = wantSources.map(() => '?').join(', ')
+    conditions.push(`(source IS NULL OR source IN (${placeholders}))`)
+    params.push(...wantSources)
+  } else if (wantSources.length > 0) {
+    // Email account(s) only
+    const placeholders = wantSources.map(() => '?').join(', ')
+    conditions.push(`source IN (${placeholders})`)
+    params.push(...wantSources)
+  } else if (wantScanned) {
+    // Scanned physical receipts only
+    conditions.push('source IS NULL')
+  } else {
+    // Default (no params sent) → scanned only
     conditions.push('source IS NULL')
   }
-  // include_imports=1 with no source → all receipts (scanned + all email imports)
 
   if (from) {
     conditions.push('date >= ?')
