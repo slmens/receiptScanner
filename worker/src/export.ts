@@ -13,10 +13,17 @@ type AppContext = Context<{ Bindings: Env; Variables: Variables }>
  * Note: vendor filter is not supported — vendor names are encrypted at rest.
  */
 export async function exportHandler(c: AppContext) {
-  const { from, to, category } = c.req.query()
+  const { from, to, category, include_imports } = c.req.query()
 
   const conditions = ['deleted_at IS NULL']
   const params: (string | number)[] = []
+
+  // By default exclude email imports (source IS NOT NULL) from the Excel export
+  // so that scanned physical receipts and digital email receipts stay separate.
+  // Pass include_imports=1 to override.
+  if (include_imports !== '1') {
+    conditions.push('source IS NULL')
+  }
 
   if (from) {
     conditions.push('date >= ?')

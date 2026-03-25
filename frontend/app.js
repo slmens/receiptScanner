@@ -2177,9 +2177,13 @@ const views = {
               ${CATEGORIES.map(c => `<option value="${c}">${c}</option>`).join('')}
             </select>
           </div>
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:var(--sp-5);font-size:14px;color:var(--clr-text-2)">
+            <input type="checkbox" id="ex-include-imports" style="width:16px;height:16px;accent-color:var(--clr-accent);cursor:pointer" />
+            Include email imports (Gmail / Takeout)
+          </label>
           <button class="btn btn--secondary btn--full" id="btn-preview">Preview</button>
           <p style="margin-top:var(--sp-4);margin-bottom:0;font-size:12px;color:var(--clr-text-3);text-align:center;line-height:1.5">
-            Exports the filtered receipts as an Excel spreadsheet for your accountant.
+            By default only scanned physical receipts are exported. Tick the box above to also include email imports.
           </p>
         </div>
 
@@ -2211,9 +2215,10 @@ const views = {
 
       try {
         const filters = {
-          from:     document.getElementById('ex-from').value,
-          to:       document.getElementById('ex-to').value,
-          category: document.getElementById('ex-cat').value,
+          from:            document.getElementById('ex-from').value,
+          to:              document.getElementById('ex-to').value,
+          category:        document.getElementById('ex-cat').value,
+          include_imports: document.getElementById('ex-include-imports').checked ? '1' : '',
         }
         const data = await api.exportReceipts(filters)
         exportData = data.receipts
