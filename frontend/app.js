@@ -1761,7 +1761,7 @@ const views = {
         summaryEl.textContent = `Imported: ${counters.imported}  |  Skipped: ${counters.skipped}  |  Errors: ${counters.errors}`
       }
 
-      const PostalMime = (await import('https://esm.sh/postal-mime')).default
+      const PostalMime = (await import('/postal-mime.js')).default
 
       for (let i = 0; i < state.messages.length; i++) {
         if (state.stopRequested) break
