@@ -1,6 +1,6 @@
 import type { Context } from 'hono'
 import type { Env, ListReceiptsQuery, ReceiptRow, Variables } from './types'
-import { extractReceipt } from './extract'
+import { extractReceipt, extractFromText } from './extract'
 import {
   buildImageKey,
   buildTempKey,
@@ -492,6 +492,148 @@ export async function serveImageHandler(c: AppContext) {
       'Cache-Control': 'no-store',
     },
   })
+}
+
+// ── Email import ──────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/receipts/import
+ *
+ * Called once per email by the client-side import loop.
+ * The client pre-processes the .eml/.mbox and sends either:
+ *   - textContent: plain text body (preferred, cheapest)
+ *   - imageData + mimeType: inline image fallback (vision pipeline)
+ *
+ * Returns { skipped: true } if the source_id was already imported.
+ */
+export async function importEmailHandler(c: AppContext) {
+  let body: {
+    source: string
+    sourceId: string
+    subject?: string | null
+    fromName?: string | null
+    fromAddress?: string | null
+    date?: string | null
+    // Text path (most emails)
+    textContent?: string | null
+    // Vision fallback (image-only emails)
+    imageDataBase64?: string | null
+    imageMimeType?: string | null
+  }
+
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400)
+  }
+
+  if (!body.source)   return c.json({ error: 'source is required' }, 400)
+  if (!body.sourceId) return c.json({ error: 'sourceId is required' }, 400)
+
+  const encKey = await deriveEncryptionKey(c.env.ENCRYPTION_KEY)
+
+  // ── Dedupe: if this message was already imported, skip immediately ────────────
+  const existing = await c.env.DB.prepare(
+    'SELECT id FROM receipts WHERE source = ? AND source_id = ? LIMIT 1',
+  )
+    .bind(body.source, body.sourceId)
+    .first<{ id: string }>()
+
+  if (existing) return c.json({ skipped: true, id: existing.id })
+
+  // ── Extraction ───────────────────────────────────────────────────────────────
+  let extracted
+  let imageKey: string
+  let mimeType: string
+
+  if (body.textContent && body.textContent.trim().length > 0) {
+    // Text path — cheapest, works for the vast majority of receipt emails
+    extracted = await extractFromText(
+      body.textContent,
+      {
+        subject:  body.subject  ?? undefined,
+        fromName: body.fromName ?? undefined,
+        date:     body.date     ?? undefined,
+      },
+      c.env,
+    )
+    // Store the text body in R2 so the detail view can show it
+    const id = crypto.randomUUID()
+    mimeType = 'text/plain'
+    imageKey = `receipts/${id}.txt`
+    const textBytes = new TextEncoder().encode(body.textContent)
+    await uploadToR2(c.env.RECEIPTS, imageKey, textBytes.buffer as ArrayBuffer, mimeType)
+
+    return c.json({ receipt: await saveImportedReceipt(c, encKey, id, imageKey, mimeType, extracted, body) }, 201)
+
+  } else if (body.imageDataBase64 && body.imageMimeType) {
+    // Vision fallback — inline image attachment
+    const imgMime = canonicalMime(body.imageMimeType)
+    const binary = atob(body.imageDataBase64)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+
+    extracted = await extractReceipt(bytes, imgMime, c.env)
+    const id = crypto.randomUUID()
+    mimeType = imgMime
+    imageKey = buildImageKey(id, mimeType)
+    await uploadToR2(c.env.RECEIPTS, imageKey, bytes.buffer, mimeType)
+
+    return c.json({ receipt: await saveImportedReceipt(c, encKey, id, imageKey, mimeType, extracted, body) }, 201)
+
+  } else {
+    return c.json({ error: 'Either textContent or imageDataBase64+imageMimeType is required' }, 400)
+  }
+}
+
+async function saveImportedReceipt(
+  c: AppContext,
+  encKey: CryptoKey,
+  id: string,
+  imageKey: string,
+  mimeType: string,
+  extracted: Awaited<ReturnType<typeof extractFromText>>,
+  meta: { source: string; sourceId: string; fromName?: string | null; fromAddress?: string | null },
+) {
+  const vendorRaw = extracted.vendor?.trim() || meta.fromName || meta.fromAddress || 'Unknown'
+
+  const [encVendor, encNotes, encInvoiceNumber] = await Promise.all([
+    encryptField(vendorRaw, encKey),
+    maybeEncrypt(extracted.notes ?? null, encKey),
+    maybeEncrypt(extracted.invoice_number ?? null, encKey),
+  ])
+
+  await c.env.DB.prepare(`
+    INSERT INTO receipts
+      (id, date, vendor, category, subtotal, hst, total, payment_method,
+       invoice_number, notes, image_key, original_filename, file_type, source, source_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+    .bind(
+      id,
+      extracted.date,
+      encVendor,
+      extracted.category ?? 'Other',
+      extracted.subtotal ?? null,
+      extracted.hst ?? null,
+      extracted.total,
+      extracted.payment_method ?? 'unknown',
+      encInvoiceNumber,
+      encNotes,
+      imageKey,
+      null,
+      mimeType,
+      meta.source,
+      meta.sourceId,
+    )
+    .run()
+
+  const row = await c.env.DB.prepare('SELECT * FROM receipts WHERE id = ?')
+    .bind(id)
+    .first<ReceiptRow>()
+
+  if (!row) throw new Error('Failed to retrieve saved receipt')
+  return decryptRow(row, encKey)
 }
 
 // ── Stats ──────────────────────────────────────────────────────────────────────

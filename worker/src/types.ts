@@ -40,6 +40,8 @@ export interface ReceiptRow {
   created_at: string
   updated_at: string
   deleted_at: string | null
+  source: string | null
+  source_id: string | null
 }
 
 export interface ExtractedData {

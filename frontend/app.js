@@ -1776,32 +1776,26 @@ const views = {
           continue
         }
 
-        const preferredAttachment = (parsed.attachments || []).find(a => {
-          const mime = (a.mimeType || '').toLowerCase()
-          return mime === 'application/pdf' || mime.startsWith('image/')
-        })
-
         let sourceId = (parsed.messageId || '').trim()
         if (!sourceId) {
           sourceId = await stableMessageId(item.raw, item.sourceFile, i)
         }
 
+        // Build the payload client-side — worker only receives what it needs
+        const textContent = emailToText(parsed)
+        const imageFallback = textContent.length < 30 ? emailToImage(parsed) : null
+
         const payload = {
           source: 'gmail',
           sourceId,
-          date: parsed.date ? fmt.dateInput(parsed.date) : null,
+          subject:     parsed.subject ?? null,
+          fromName:    parsed.from?.name ?? null,
           fromAddress: parsed.from?.address ?? null,
-          fromName: parsed.from?.name ?? null,
-          subject: parsed.subject ?? null,
-          htmlBody: parsed.html ?? null,
-          textBody: parsed.text ?? null,
-          attachment: preferredAttachment
-            ? {
-                filename: preferredAttachment.filename ?? null,
-                mimeType: preferredAttachment.mimeType ?? null,
-                dataBase64: typeof preferredAttachment.content === 'string' ? preferredAttachment.content : null,
-              }
-            : null,
+          date:        parsed.date ? fmt.dateInput(parsed.date) : null,
+          // Text path (preferred — plain text or stripped HTML)
+          textContent: textContent || null,
+          // Vision fallback (image-only emails with no readable text)
+          ...(imageFallback ?? {}),
         }
 
         try {
@@ -2725,6 +2719,52 @@ const pwa = (() => {
 
   return { showInstallModal, isInstalled }
 })()
+
+// ── Email import helpers ───────────────────────────────────────────────────────
+
+/**
+ * Extract plain text from an email parsed by PostalMime.
+ * Priority: text/plain → strip HTML → empty string.
+ */
+function emailToText(parsed) {
+  // Best case: clean plain-text part already exists
+  if (parsed.text && parsed.text.trim().length > 30) {
+    return parsed.text.trim().slice(0, 6000)
+  }
+
+  // Fall back: strip HTML in the browser using DOMParser
+  if (parsed.html) {
+    try {
+      const doc = new DOMParser().parseFromString(parsed.html, 'text/html')
+      // Remove style and script nodes entirely
+      doc.querySelectorAll('style, script, head').forEach(el => el.remove())
+      const text = (doc.body?.innerText || doc.body?.textContent || '')
+        .replace(/[ \t]{2,}/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+      if (text.length > 30) return text.slice(0, 6000)
+    } catch {
+      // DOMParser not available or failed — continue to empty fallback
+    }
+  }
+
+  return ''
+}
+
+/**
+ * If emailToText returns nothing (image-only email), try to find the first
+ * inline image attachment to send to the vision pipeline.
+ */
+function emailToImage(parsed) {
+  const att = (parsed.attachments || []).find(a => {
+    const mime = (a.mimeType || '').toLowerCase()
+    return mime.startsWith('image/') || mime === 'application/pdf'
+  })
+  if (!att) return null
+  const data = typeof att.content === 'string' ? att.content : null
+  if (!data) return null
+  return { imageDataBase64: data, imageMimeType: att.mimeType }
+}
 
 // ── App init ───────────────────────────────────────────────────────────────────
 

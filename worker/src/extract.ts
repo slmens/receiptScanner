@@ -286,6 +286,104 @@ async function extractViaMistral(
   return parseExtraction(chatResult.choices[0]?.message?.content?.trim() ?? '')
 }
 
+// ── Text-based extraction (email import) ──────────────────────────────────────
+
+/**
+ * Extract receipt data from plain text (email body).
+ * Used by the email import flow — no vision/OCR needed, just a text prompt.
+ */
+export async function extractFromText(
+  text: string,
+  hint: { subject?: string; fromName?: string; date?: string },
+  env: Pick<Env, 'ANTHROPIC_API_KEY' | 'OPENROUTER_API_KEY' | 'MISTRAL_API_KEY'>,
+): Promise<ExtractedData> {
+  const context = [
+    hint.fromName ? `Sender: ${hint.fromName}` : '',
+    hint.subject  ? `Subject: ${hint.subject}` : '',
+    hint.date     ? `Email date: ${hint.date}` : '',
+  ].filter(Boolean).join('\n')
+
+  const prompt = `${context ? context + '\n\n' : ''}Email body:\n\n${text.slice(0, 6000)}`
+
+  if (env.MISTRAL_API_KEY && env.MISTRAL_API_KEY !== 'unused') {
+    return extractTextViaMistral(prompt, env.MISTRAL_API_KEY)
+  }
+  if (env.OPENROUTER_API_KEY && env.OPENROUTER_API_KEY !== 'unused') {
+    return extractTextViaOpenRouter(prompt, env.OPENROUTER_API_KEY)
+  }
+  if (env.ANTHROPIC_API_KEY && env.ANTHROPIC_API_KEY !== 'unused') {
+    return extractTextViaAnthropic(prompt, env.ANTHROPIC_API_KEY)
+  }
+  throw new Error('No API key configured.')
+}
+
+async function extractTextViaAnthropic(prompt: string, apiKey: string): Promise<ExtractedData> {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: ANTHROPIC_MODEL,
+      max_tokens: 1024,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+  })
+  if (!response.ok) throw new Error(`Anthropic API error ${response.status}: ${await response.text()}`)
+  const result = (await response.json()) as AnthropicResponse
+  if (result.error) throw new Error(`Anthropic error: ${result.error.message}`)
+  return parseExtraction(result.content[0]?.text?.trim() ?? '')
+}
+
+async function extractTextViaOpenRouter(prompt: string, apiKey: string): Promise<ExtractedData> {
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+      'HTTP-Referer': 'https://github.com/receipt-vault',
+      'X-Title': 'Receipt Vault',
+    },
+    body: JSON.stringify({
+      model: OPENROUTER_MODEL,
+      max_tokens: 1024,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: prompt },
+      ],
+    }),
+  })
+  if (!response.ok) throw new Error(`OpenRouter API error ${response.status}: ${await response.text()}`)
+  const result = (await response.json()) as OpenAIResponse
+  if (result.error) throw new Error(`OpenRouter error: ${result.error.message}`)
+  return parseExtraction(result.choices[0]?.message?.content?.trim() ?? '')
+}
+
+async function extractTextViaMistral(prompt: string, apiKey: string): Promise<ExtractedData> {
+  const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: MISTRAL_CHAT_MODEL,
+      max_tokens: 1024,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: prompt },
+      ],
+    }),
+  })
+  if (!response.ok) throw new Error(`Mistral API error ${response.status}: ${await response.text()}`)
+  const result = (await response.json()) as MistralChatResponse
+  if (result.error) throw new Error(`Mistral error: ${result.error.message}`)
+  return parseExtraction(result.choices[0]?.message?.content?.trim() ?? '')
+}
+
 function parseExtraction(raw: string): ExtractedData {
   // Strip accidental markdown code fences
   const cleaned = raw

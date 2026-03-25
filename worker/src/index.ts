@@ -10,6 +10,7 @@ import {
   extractReceiptHandler,
   getReceiptHandler,
   getStatsHandler,
+  importEmailHandler,
   listReceiptsHandler,
   serveImageHandler,
   updateReceiptHandler,
@@ -98,8 +99,9 @@ app.post('/auth/login', loginHandler)
 
 app.use('/api/*', authMiddleware)
 
-// Receipts — note: /extract must come before /:id to avoid param collision
+// Receipts — note: /extract and /import must come before /:id to avoid param collision
 app.post('/api/receipts/extract', extractReceiptHandler)
+app.post('/api/receipts/import', importEmailHandler)
 app.post('/api/receipts/discard', discardPendingHandler)
 app.get('/api/receipts', listReceiptsHandler)
 app.post('/api/receipts', createReceiptHandler)
